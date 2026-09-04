@@ -5,16 +5,29 @@ from __future__ import annotations
 from html import escape
 from typing import Any
 
+from domain.status import (
+    DEFAULT_STATUS,
+    IN_TRANSIT_STATUSES,
+    STATUSES,
+    WORKING_STATUSES,
+    status_display_label,
+)
+from utils.dates import extract_date_component
 from utils.timefmt import format_utc_display
 
-# Stable internal status values (order used in status pickers / By Status)
-STATUSES: tuple[str, ...] = (
-    "standby",
-    "preparing",
-    "make_label",
-    "enroute",
-    "out_for_delivery",
-)
+# Re-export for existing bot call sites
+__all__ = [
+    "DEFAULT_STATUS",
+    "STATUSES",
+    "STATUS_EMOJI",
+    "STATUS_LABELS",
+    "WORKING_STATUSES",
+    "status_label",
+    "shipment_title",
+    "format_active_list",
+    "format_details",
+    "format_reminder_notice",
+]
 
 # Summary list: standby has no emoji (client style)
 STATUS_EMOJI: dict[str, str] = {
@@ -23,6 +36,7 @@ STATUS_EMOJI: dict[str, str] = {
     "make_label": "📝",
     "enroute": "✈️",
     "out_for_delivery": "🚚",
+    "delivered": "✅",
 }
 
 # Select Shipment grid: every status gets a visible emoji
@@ -32,6 +46,7 @@ SELECTOR_STATUS_EMOJI: dict[str, str] = {
     "make_label": "📝",
     "enroute": "✈️",
     "out_for_delivery": "🚚",
+    "delivered": "✅",
 }
 
 STATUS_LABELS: dict[str, str] = {
@@ -40,20 +55,12 @@ STATUS_LABELS: dict[str, str] = {
     "make_label": "📝 Make Label",
     "enroute": "✈️ EnRoute",
     "out_for_delivery": "🚚 Out For Delivery",
+    "delivered": "✅ Delivered",
 }
-
-WORKING_STATUSES: tuple[str, ...] = (
-    "preparing",
-    "make_label",
-    "out_for_delivery",
-    "standby",
-)
-
-DEFAULT_STATUS = "preparing"
 
 
 def status_label(status: str) -> str:
-    return STATUS_LABELS.get(status, status)
+    return STATUS_LABELS.get(status, status_display_label(status))
 
 
 def status_emoji(status: str) -> str:
@@ -95,37 +102,46 @@ def shipment_edd_raw(shipment: dict[str, Any]) -> str | None:
     return text or None
 
 
+def format_edd_display(shipment: dict[str, Any]) -> str:
+    raw = shipment_edd_raw(shipment)
+    date_only = extract_date_component(raw)
+    if date_only:
+        return date_only
+    return format_utc_display(raw)
+
+
 def format_shipment_line(shipment: dict[str, Any]) -> str:
-    """One summary line: • DE : Oner ✈️ — 2026-08-09 18:00 UTC."""
+    """One summary line: • DE : Oner ✈️ — 2026-08-09."""
     title = esc(shipment_title(shipment))
     emoji = status_emoji(shipment.get("status", ""))
-    edd = shipment_edd_raw(shipment)
+    edd = format_edd_display(shipment)
 
     if emoji:
         line = f"• {title} {emoji}"
     else:
         line = f"• {title}"
 
-    if edd:
-        line = f"{line} — {esc(format_utc_display(edd))}"
+    if edd and edd != "—":
+        line = f"{line} — {esc(edd)}"
     return line
 
 
 def format_active_list(shipments: list[dict[str, Any]]) -> str:
-    """Main summary: EnRoute first, then Working On / Standby."""
+    """Main summary: In Transit first, then Working On."""
     if not shipments:
         return (
             "📦 <b>Shipments</b>\n\n"
             "No active shipments yet.\n"
-            "Use ➕ Add to create one."
+            "Tap ➕ Add to create one."
         )
 
-    enroute: list[dict[str, Any]] = []
+    in_transit: list[dict[str, Any]] = []
     working: list[dict[str, Any]] = []
     for item in shipments:
-        if item.get("status") == "enroute":
-            enroute.append(item)
-        else:
+        status = item.get("status")
+        if status in IN_TRANSIT_STATUSES:
+            in_transit.append(item)
+        elif status in WORKING_STATUSES:
             working.append(item)
 
     working.sort(
@@ -136,17 +152,24 @@ def format_active_list(shipments: list[dict[str, Any]]) -> str:
             item.get("id") or 0,
         )
     )
-    enroute.sort(key=lambda item: item.get("id") or 0)
+    in_transit.sort(
+        key=lambda item: (
+            IN_TRANSIT_STATUSES.index(item["status"])
+            if item.get("status") in IN_TRANSIT_STATUSES
+            else 99,
+            item.get("id") or 0,
+        )
+    )
 
     parts = ["📦 <b>Shipments</b>"]
-    if enroute:
+    if in_transit:
         parts.append("")
-        parts.append("<b>✈️ EnRoute:</b>")
-        for item in enroute:
+        parts.append("<b>In Transit:</b>")
+        for item in in_transit:
             parts.append(format_shipment_line(item))
     if working:
         parts.append("")
-        parts.append("<b>Working On / Standby:</b>")
+        parts.append("<b>Working On:</b>")
         for item in working:
             parts.append(format_shipment_line(item))
     return "\n".join(parts)
@@ -176,11 +199,12 @@ def format_details(
     reminder_text: str | None = None,
 ) -> str:
     note = shipment.get("note") or "—"
-    edd = format_utc_display(shipment_edd_raw(shipment))
+    edd = format_edd_display(shipment)
     updated = shipment.get("updated_at") or "—"
     reminder = reminder_text or "—"
     return (
         "<b>📦 Shipment</b>\n\n"
+        f"ID: #{shipment.get('id', '—')}\n"
         f"Country: {esc(shipment.get('country') or '—')}\n"
         f"Clone: {esc(shipment.get('clone_name') or '—')}\n"
         f"Status: {status_label(shipment['status'])}\n"
@@ -198,18 +222,18 @@ def format_search_results(query: str, shipments: list[dict[str, Any]]) -> str:
 
 
 def format_reminder_notice(shipment: dict[str, Any]) -> str:
-    edd = format_utc_display(shipment_edd_raw(shipment))
+    edd = format_edd_display(shipment)
     return (
         "⏰ <b>Shipment Reminder</b>\n\n"
         f"{esc(shipment_title(shipment))}\n"
         f"Status: {status_label(shipment['status'])}\n"
-        f"EDD: {esc(edd)}\n\n"
-        "This shipment is due soon."
+        f"Expected delivery: {esc(edd)}\n\n"
+        "Open the tracker to review this shipment."
     )
 
 
 def format_reminder_menu(shipment: dict[str, Any], reminder_text: str | None) -> str:
-    edd = format_utc_display(shipment_edd_raw(shipment))
+    edd = format_edd_display(shipment)
     current = reminder_text or "—"
     return (
         "⏰ <b>Shipment Reminder</b>\n\n"

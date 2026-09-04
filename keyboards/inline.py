@@ -5,7 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from aiogram.filters.callback_data import CallbackData
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from utils.formatting import (
@@ -31,7 +34,8 @@ class StatusCB(CallbackData, prefix="sts"):
     status: str = ""
 
 
-def main_menu_keyboard() -> InlineKeyboardMarkup:
+def main_menu_keyboard(*, mini_app_url: str | None = None) -> InlineKeyboardMarkup:
+    del mini_app_url
     builder = InlineKeyboardBuilder()
     builder.button(text="📋 Active Shipments", callback_data=MenuCB(action="active").pack())
     builder.button(text="➕ Add Shipment", callback_data=MenuCB(action="add").pack())
@@ -76,7 +80,6 @@ def select_shipment_keyboard(shipments: list[dict[str, Any]]) -> InlineKeyboardM
         emoji = selector_status_emoji(item.get("status", ""))
         title = shipment_title(item)
         text = f"{emoji} {title}".strip()
-        # Telegram button label limit is generous; keep readable on mobile
         if len(text) > 30:
             text = text[:27] + "..."
         builder.button(
@@ -174,7 +177,12 @@ def reminder_menu_keyboard(
     return builder.as_markup()
 
 
-def open_shipment_keyboard(shipment_id: int) -> InlineKeyboardMarkup:
+def open_shipment_keyboard(
+    shipment_id: int,
+    *,
+    mini_app_url: str | None = None,
+) -> InlineKeyboardMarkup:
+    del mini_app_url
     builder = InlineKeyboardBuilder()
     builder.button(
         text="📦 Open Shipment",
@@ -191,6 +199,8 @@ def status_picker_keyboard(
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for status in STATUSES:
+        if status == "delivered" and for_create:
+            continue
         if for_create:
             callback = ShipmentCB(action="create_status", value=status).pack()
         else:

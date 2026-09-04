@@ -2,14 +2,13 @@
 
 from aiogram import Router
 
-from handlers.callbacks import router as callbacks_router
-from handlers.shipments import router as shipments_router
-from handlers.start import router as start_router
+from config import Config
+from handlers.workspace import router as workspace_router
 
 
-def get_root_router() -> Router:
+def get_root_router(config: Config) -> Router:
+    del config
     root = Router()
-    root.include_router(start_router)
-    root.include_router(callbacks_router)
-    root.include_router(shipments_router)
+    # /start and /menu are workspace-only. Do not register handlers.start.
+    root.include_router(workspace_router)
     return root

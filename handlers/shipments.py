@@ -122,6 +122,7 @@ async def process_edd_create(
         status=status,
         expected_delivery_date=edd_store,
         created_by=user.id if user else None,
+        require_account=False,
     )
     await state.clear()
     text = await details_text(repo, shipment, notice="✅ Shipment added")

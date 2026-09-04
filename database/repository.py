@@ -9,10 +9,33 @@ from typing import Any
 import aiosqlite
 
 from database.db import Database
-from utils.formatting import DEFAULT_STATUS, STATUSES
-from utils.timefmt import now_utc, normalize_stored_utc, to_store, try_parse_stored
+from domain.status import (
+    ACTIVE_STATUSES,
+    DEFAULT_STATUS,
+    DELIVERED_STATUS,
+    IN_TRANSIT_STATUSES,
+    STATUSES,
+    WORKING_STATUSES,
+)
+from utils.dates import coerce_iso_date, extract_date_component
+from utils.timefmt import now_utc, to_store, try_parse_stored
 
 logger = logging.getLogger(__name__)
+
+MAX_COUNTRY_LEN = 40
+MAX_CLONE_LEN = 80
+MAX_SHIPMENT_NAME_LEN = 80
+MAX_NOTE_LEN = 500
+MAX_BOX_WEIGHT = 10000.0
+SHIPMENT_SELECT = """
+SELECT
+    s.*,
+    a.name AS account_name,
+    t.name AS client_team_name
+FROM shipments s
+LEFT JOIN accounts a ON a.id = s.account_id
+LEFT JOIN client_teams t ON t.id = s.client_team_id
+"""
 
 
 def _now() -> str:
@@ -25,12 +48,25 @@ def _row_to_dict(row: aiosqlite.Row | None) -> dict[str, Any] | None:
     return dict(row)
 
 
-def _compose_display_name(country: str, clone_name: str) -> str:
+def _compose_display_name(country: str, clone_name: str, name: str = "") -> str:
     country = country.strip()
     clone_name = clone_name.strip()
-    if country and clone_name:
-        return f"{country}: {clone_name}"
-    return clone_name or country
+    name = name.strip()
+    secondary = clone_name or name
+    if country and secondary:
+        return f"{country}: {secondary}"
+    return secondary or country
+
+
+def validate_box_weight(value: float | int | None) -> float | None:
+    if value is None:
+        return None
+    weight = float(value)
+    if weight <= 0:
+        raise ValueError("Box weight must be a positive number")
+    if weight > MAX_BOX_WEIGHT:
+        raise ValueError(f"Box weight must be at most {MAX_BOX_WEIGHT:g} kg")
+    return round(weight, 3)
 
 
 # Initial list matching the previous chat-based tracker
@@ -39,37 +75,37 @@ SEED_SHIPMENTS: tuple[dict[str, str | None], ...] = (
         "country": "DE",
         "clone_name": "Oner",
         "status": "enroute",
-        "expected_delivery_date": "2026-08-13T18:00:00Z",
+        "expected_delivery_date": "2026-08-13",
     },
     {
         "country": "CA",
         "clone_name": "Durston",
         "status": "preparing",
-        "expected_delivery_date": "2026-08-18T12:00:00Z",
+        "expected_delivery_date": "2026-08-18",
     },
     {
         "country": "DE",
         "clone_name": "Oner",
         "status": "preparing",
-        "expected_delivery_date": "2026-08-20T12:00:00Z",
+        "expected_delivery_date": "2026-08-20",
     },
     {
         "country": "ATL",
         "clone_name": "Auto",
         "status": "preparing",
-        "expected_delivery_date": "2026-08-19T12:00:00Z",
+        "expected_delivery_date": "2026-08-19",
     },
     {
         "country": "LA",
         "clone_name": "Le Bon",
         "status": "standby",
-        "expected_delivery_date": "2026-08-25T12:00:00Z",
+        "expected_delivery_date": "2026-08-25",
     },
     {
         "country": "DE",
         "clone_name": "Blickle",
         "status": "standby",
-        "expected_delivery_date": "2026-08-26T12:00:00Z",
+        "expected_delivery_date": "2026-08-26",
     },
 )
 
@@ -120,47 +156,107 @@ class ShipmentRepository:
                 status=str(item["status"]),
                 expected_delivery_date=item["expected_delivery_date"],
                 created_by=None,
+                require_account=False,
             )
+        await self.db.migrate_legacy_clone_to_accounts()
+        await self.db.connection.commit()
         logger.info("Seeded %s initial shipments", len(SEED_SHIPMENTS))
         return len(SEED_SHIPMENTS)
+
+    async def _require_account(self, account_id: int | None) -> None:
+        if account_id is None:
+            raise ValueError("Account is required")
+        cursor = await self.db.connection.execute(
+            "SELECT id FROM accounts WHERE id = ? AND archived = 0",
+            (account_id,),
+        )
+        if await cursor.fetchone() is None:
+            raise ValueError("Account not found")
+
+    async def _require_team(self, client_team_id: int | None) -> None:
+        if client_team_id is None:
+            return
+        cursor = await self.db.connection.execute(
+            "SELECT id FROM client_teams WHERE id = ? AND archived = 0",
+            (client_team_id,),
+        )
+        if await cursor.fetchone() is None:
+            raise ValueError("Client team not found")
 
     async def create(
         self,
         *,
         country: str,
-        clone_name: str,
+        clone_name: str = "",
+        name: str | None = None,
         status: str = DEFAULT_STATUS,
         created_by: int | None = None,
         note: str | None = None,
-        expected_delivery_date: str,
+        expected_delivery_date: str | None = None,
+        account_id: int | None = None,
+        client_team_id: int | None = None,
+        box_weight: float | None = None,
+        label_creation_date: str | None = None,
+        scanned_in_date: str | None = None,
+        require_account: bool = True,
     ) -> dict[str, Any]:
         if status not in STATUSES:
             raise ValueError(f"Invalid status: {status}")
+        if status == DELIVERED_STATUS:
+            raise ValueError("Create the shipment first, then mark it delivered")
 
         country = country.strip()
-        clone_name = clone_name.strip()
-        edd = normalize_stored_utc(expected_delivery_date)
-        if not edd or try_parse_stored(edd) is None:
-            raise ValueError("expected_delivery_date must be a valid UTC datetime")
-        display_name = _compose_display_name(country, clone_name)
+        clone_name = (clone_name or "").strip()
+        shipment_name = (name or "").strip() or None
+        if not country:
+            raise ValueError("Country is required")
+        if len(country) > MAX_COUNTRY_LEN:
+            raise ValueError(f"Country is too long (max {MAX_COUNTRY_LEN})")
+        if clone_name and len(clone_name) > MAX_CLONE_LEN:
+            raise ValueError(f"Clone is too long (max {MAX_CLONE_LEN})")
+        if shipment_name and len(shipment_name) > MAX_SHIPMENT_NAME_LEN:
+            raise ValueError(f"Name is too long (max {MAX_SHIPMENT_NAME_LEN})")
+        if note is not None and len(note) > MAX_NOTE_LEN:
+            raise ValueError(f"Note is too long (max {MAX_NOTE_LEN})")
+
+        if require_account:
+            await self._require_account(account_id)
+        elif account_id is not None:
+            await self._require_account(account_id)
+        await self._require_team(client_team_id)
+
+        edd = coerce_iso_date(expected_delivery_date) if expected_delivery_date else None
+        label_date = coerce_iso_date(label_creation_date) if label_creation_date else None
+        scanned_date = coerce_iso_date(scanned_in_date) if scanned_in_date else None
+        weight = validate_box_weight(box_weight)
+
+        display_name = _compose_display_name(country, clone_name, shipment_name or "")
         now = _now()
         try:
             cursor = await self.db.connection.execute(
                 """
                 INSERT INTO shipments (
-                    country, clone_name, display_name, status, note,
+                    country, clone_name, name, display_name, status, note,
                     expected_date, expected_delivery_date,
+                    account_id, client_team_id, box_weight,
+                    label_creation_date, scanned_in_date, delivered_date,
                     created_at, updated_at, created_by, archived
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 0)
                 """,
                 (
                     country,
-                    clone_name,
+                    clone_name or None,
+                    shipment_name,
                     display_name,
                     status,
                     note,
                     edd,
                     edd,
+                    account_id,
+                    client_team_id,
+                    weight,
+                    label_date,
+                    scanned_date,
                     now,
                     now,
                     created_by,
@@ -195,81 +291,241 @@ class ShipmentRepository:
 
     async def get_by_id(self, shipment_id: int) -> dict[str, Any] | None:
         cursor = await self.db.connection.execute(
-            "SELECT * FROM shipments WHERE id = ?",
+            SHIPMENT_SELECT + " WHERE s.id = ?",
             (shipment_id,),
         )
         return _row_to_dict(await cursor.fetchone())
 
+    def _active_where(self) -> str:
+        placeholders = ",".join("?" * len(ACTIVE_STATUSES))
+        return f"s.archived = 0 AND s.status IN ({placeholders})"
+
     async def list_active(self) -> list[dict[str, Any]]:
+        placeholders = ",".join("?" * len(ACTIVE_STATUSES))
         cursor = await self.db.connection.execute(
-            """
-            SELECT * FROM shipments
-            WHERE archived = 0
+            f"""
+            {SHIPMENT_SELECT}
+            WHERE s.archived = 0 AND s.status IN ({placeholders})
             ORDER BY
-                CASE WHEN status = 'enroute' THEN 0 ELSE 1 END,
-                CASE status
-                    WHEN 'enroute' THEN 0
-                    WHEN 'preparing' THEN 1
-                    WHEN 'make_label' THEN 2
-                    WHEN 'out_for_delivery' THEN 3
-                    WHEN 'standby' THEN 4
+                CASE
+                    WHEN s.status = 'enroute' THEN 0
+                    WHEN s.status = 'out_for_delivery' THEN 1
+                    WHEN s.status = 'preparing' THEN 2
+                    WHEN s.status = 'make_label' THEN 3
+                    WHEN s.status = 'standby' THEN 4
                     ELSE 5
                 END,
-                id ASC
-            """
-        )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
-
-    async def list_by_status(self, status: str) -> list[dict[str, Any]]:
-        cursor = await self.db.connection.execute(
-            """
-            SELECT * FROM shipments
-            WHERE archived = 0 AND status = ?
-            ORDER BY updated_at DESC, id DESC
+                s.id ASC
             """,
-            (status,),
+            ACTIVE_STATUSES,
         )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict(row) for row in await cursor.fetchall()]
 
-    async def count_by_status(self) -> dict[str, int]:
+    async def list_by_status(self, status: str, *, archived: bool = False) -> list[dict[str, Any]]:
         cursor = await self.db.connection.execute(
-            """
-            SELECT status, COUNT(*) AS cnt
-            FROM shipments
-            WHERE archived = 0
-            GROUP BY status
-            """
+            f"""
+            {SHIPMENT_SELECT}
+            WHERE s.archived = ? AND s.status = ?
+            ORDER BY s.updated_at DESC, s.id DESC
+            """,
+            (1 if archived else 0, status),
         )
-        rows = await cursor.fetchall()
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def count_by_status(self, *, archived: bool | None = False) -> dict[str, int]:
+        sql = "SELECT status, COUNT(*) AS cnt FROM shipments"
+        params: list[Any] = []
+        if archived is not None:
+            sql += " WHERE archived = ?"
+            params.append(1 if archived else 0)
+        sql += " GROUP BY status"
+        cursor = await self.db.connection.execute(sql, params)
         counts = {status: 0 for status in STATUSES}
-        for row in rows:
+        for row in await cursor.fetchall():
             status = row["status"]
             if status in counts:
                 counts[status] = row["cnt"]
         return counts
 
+    async def dashboard_counts(self) -> dict[str, int]:
+        active_ph = ",".join("?" * len(ACTIVE_STATUSES))
+        transit_ph = ",".join("?" * len(IN_TRANSIT_STATUSES))
+        working_ph = ",".join("?" * len(WORKING_STATUSES))
+        cursor = await self.db.connection.execute(
+            f"""
+            SELECT
+                SUM(CASE WHEN archived = 0 AND status IN ({active_ph}) THEN 1 ELSE 0 END) AS active,
+                SUM(CASE WHEN archived = 0 AND status IN ({transit_ph}) THEN 1 ELSE 0 END) AS in_transit,
+                SUM(CASE WHEN archived = 0 AND status = ? THEN 1 ELSE 0 END) AS enroute,
+                SUM(CASE WHEN archived = 0 AND status = ? THEN 1 ELSE 0 END) AS out_for_delivery,
+                SUM(CASE WHEN archived = 0 AND status IN ({working_ph}) THEN 1 ELSE 0 END) AS working,
+                SUM(CASE WHEN archived = 0 AND status = ? THEN 1 ELSE 0 END) AS delivered,
+                SUM(CASE WHEN archived = 1 THEN 1 ELSE 0 END) AS archived
+            FROM shipments
+            """,
+            (
+                *ACTIVE_STATUSES,
+                *IN_TRANSIT_STATUSES,
+                "enroute",
+                "out_for_delivery",
+                *WORKING_STATUSES,
+                DELIVERED_STATUS,
+            ),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return {
+                "active": 0,
+                "in_transit": 0,
+                "enroute": 0,
+                "out_for_delivery": 0,
+                "working": 0,
+                "delivered": 0,
+                "archived": 0,
+            }
+        return {key: int(row[key] or 0) for key in row.keys()}
+
     async def search(self, query: str) -> list[dict[str, Any]]:
-        pattern = f"%{query}%"
+        """Legacy active-only search used by the old Telegram UI."""
+        items, _total = await self.list_filtered(
+            query=query,
+            archived=False,
+            active_only=True,
+            limit=50,
+            offset=0,
+        )
+        return items
+
+    async def list_filtered(
+        self,
+        *,
+        query: str | None = None,
+        status: str | None = None,
+        account_id: int | None = None,
+        unassigned_account: bool = False,
+        client_team_id: int | None = None,
+        archived: bool | None = False,
+        active_only: bool = False,
+        completed_only: bool = False,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        where: list[str] = ["1=1"]
+        params: list[Any] = []
+
+        if archived is not None:
+            where.append("s.archived = ?")
+            params.append(1 if archived else 0)
+        if active_only:
+            placeholders = ",".join("?" * len(ACTIVE_STATUSES))
+            where.append(f"s.status IN ({placeholders})")
+            params.extend(ACTIVE_STATUSES)
+        if completed_only:
+            where.append("s.status = ?")
+            params.append(DELIVERED_STATUS)
+        if status:
+            if status not in STATUSES:
+                raise ValueError(f"Invalid status: {status}")
+            where.append("s.status = ?")
+            params.append(status)
+        if unassigned_account:
+            where.append("s.account_id IS NULL")
+        elif account_id is not None:
+            where.append("s.account_id = ?")
+            params.append(account_id)
+        if client_team_id is not None:
+            where.append("s.client_team_id = ?")
+            params.append(client_team_id)
+
+        q = (query or "").strip()
+        if q:
+            pattern = f"%{q}%"
+            where.append(
+                """
+                (
+                    s.country LIKE ? COLLATE NOCASE
+                 OR s.clone_name LIKE ? COLLATE NOCASE
+                 OR s.name LIKE ? COLLATE NOCASE
+                 OR s.display_name LIKE ? COLLATE NOCASE
+                 OR a.name LIKE ? COLLATE NOCASE
+                 OR t.name LIKE ? COLLATE NOCASE
+                 OR CAST(s.id AS TEXT) LIKE ?
+                )
+                """
+            )
+            params.extend([pattern, pattern, pattern, pattern, pattern, pattern, pattern])
+
+        where_sql = " AND ".join(where)
+        count_sql = f"""
+            SELECT COUNT(*) AS cnt
+            FROM shipments s
+            LEFT JOIN accounts a ON a.id = s.account_id
+            LEFT JOIN client_teams t ON t.id = s.client_team_id
+            WHERE {where_sql}
+        """
+        cursor = await self.db.connection.execute(count_sql, params)
+        row = await cursor.fetchone()
+        total = int(row["cnt"]) if row else 0
+
+        limit = max(1, min(int(limit), 200))
+        offset = max(0, int(offset))
+        list_sql = f"""
+            {SHIPMENT_SELECT}
+            WHERE {where_sql}
+            ORDER BY s.updated_at DESC, s.id DESC
+            LIMIT ? OFFSET ?
+        """
+        cursor = await self.db.connection.execute(list_sql, [*params, limit, offset])
+        items = [dict(row) for row in await cursor.fetchall()]
+        return items, total
+
+    async def distinct_countries(self) -> list[str]:
+        return await self._distinct_ranked("country")
+
+    async def distinct_clones(self) -> list[str]:
+        return await self._distinct_ranked("clone_name")
+
+    async def _distinct_ranked(self, column: str) -> list[str]:
+        if column not in {"country", "clone_name"}:
+            raise ValueError(f"Unsupported distinct column: {column}")
+        cursor = await self.db.connection.execute(
+            f"""
+            SELECT {column} AS value, COUNT(*) AS cnt, MAX(id) AS last_id
+            FROM shipments
+            WHERE {column} IS NOT NULL AND TRIM({column}) != ''
+            GROUP BY {column}
+            ORDER BY cnt DESC, last_id DESC, value COLLATE NOCASE
+            """
+        )
+        return [row["value"] for row in await cursor.fetchall()]
+
+    async def list_history(self, shipment_id: int) -> list[dict[str, Any]]:
         cursor = await self.db.connection.execute(
             """
-            SELECT * FROM shipments
-            WHERE archived = 0
-              AND (
-                    country LIKE ? COLLATE NOCASE
-                 OR clone_name LIKE ? COLLATE NOCASE
-                 OR display_name LIKE ? COLLATE NOCASE
-                 OR (COALESCE(country, '') || ' : ' || COALESCE(clone_name, ''))
-                        LIKE ? COLLATE NOCASE
-              )
-            ORDER BY updated_at DESC, id DESC
-            LIMIT 50
+            SELECT * FROM status_history
+            WHERE shipment_id = ?
+            ORDER BY id ASC
             """,
-            (pattern, pattern, pattern, pattern),
+            (shipment_id,),
         )
-        rows = await cursor.fetchall()
-        return [dict(row) for row in rows]
+        return [dict(row) for row in await cursor.fetchall()]
+
+    async def _write_status_history(
+        self,
+        shipment_id: int,
+        old_status: str | None,
+        new_status: str,
+        changed_by: int | None,
+        changed_at: str,
+    ) -> None:
+        await self.db.connection.execute(
+            """
+            INSERT INTO status_history (
+                shipment_id, old_status, new_status, changed_by, changed_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (shipment_id, old_status, new_status, changed_by, changed_at),
+        )
 
     async def update_status(
         self,
@@ -277,36 +533,42 @@ class ShipmentRepository:
         new_status: str,
         *,
         changed_by: int | None = None,
+        delivered_date: str | None = None,
+        allow_archived: bool = False,
     ) -> dict[str, Any] | None:
         if new_status not in STATUSES:
             raise ValueError(f"Invalid status: {new_status}")
 
         shipment = await self.get_by_id(shipment_id)
-        if shipment is None or shipment["archived"]:
+        if shipment is None:
+            return None
+        if shipment["archived"] and not allow_archived:
             return None
 
         old_status = shipment["status"]
+        now = _now()
         if old_status == new_status:
             return shipment
 
-        now = _now()
+        delivered = shipment.get("delivered_date")
+        if new_status == DELIVERED_STATUS:
+            delivered = extract_date_component(delivered) or delivered_date
+        # Leaving Delivered keeps delivered_date as historical data.
+
         try:
             await self.db.connection.execute(
                 """
                 UPDATE shipments
-                SET status = ?, updated_at = ?
-                WHERE id = ? AND archived = 0
+                SET status = ?, delivered_date = ?, updated_at = ?
+                WHERE id = ?
                 """,
-                (new_status, now, shipment_id),
+                (new_status, delivered, now, shipment_id),
             )
-            await self.db.connection.execute(
-                """
-                INSERT INTO status_history (
-                    shipment_id, old_status, new_status, changed_by, changed_at
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (shipment_id, old_status, new_status, changed_by, now),
+            await self._write_status_history(
+                shipment_id, old_status, new_status, changed_by, now
             )
+            if new_status == DELIVERED_STATUS:
+                await self.cancel_active_reminders(shipment_id)
             await self.db.connection.commit()
             logger.info(
                 "Status changed id=%s %s -> %s by=%s",
@@ -320,101 +582,172 @@ class ShipmentRepository:
             logger.exception("Failed to update status id=%s", shipment_id)
             raise
 
-    async def update_country(
+    async def complete(
         self,
         shipment_id: int,
-        country: str,
+        *,
+        changed_by: int | None = None,
+        delivered_date: str,
     ) -> dict[str, Any] | None:
         shipment = await self.get_by_id(shipment_id)
         if shipment is None or shipment["archived"]:
             return None
+        if shipment["status"] == DELIVERED_STATUS and shipment.get("delivered_date"):
+            return shipment
+        if shipment["status"] == DELIVERED_STATUS:
+            date_value = coerce_iso_date(delivered_date)
+            if date_value is None:
+                raise ValueError("delivered_date is required")
+            now = _now()
+            await self.db.connection.execute(
+                """
+                UPDATE shipments
+                SET delivered_date = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (date_value, now, shipment_id),
+            )
+            await self.db.connection.commit()
+            return await self.get_by_id(shipment_id)
 
-        country = country.strip()
-        clone_name = (shipment.get("clone_name") or "").strip()
-        display_name = _compose_display_name(country, clone_name)
-        now = _now()
-        await self.db.connection.execute(
-            """
-            UPDATE shipments
-            SET country = ?, display_name = ?, updated_at = ?
-            WHERE id = ? AND archived = 0
-            """,
-            (country, display_name, now, shipment_id),
+        date_value = coerce_iso_date(delivered_date)
+        if date_value is None:
+            raise ValueError("delivered_date is required")
+        return await self.update_status(
+            shipment_id,
+            DELIVERED_STATUS,
+            changed_by=changed_by,
+            delivered_date=date_value,
         )
-        await self.db.connection.commit()
-        return await self.get_by_id(shipment_id)
 
-    async def update_clone_name(
+    async def update_fields(
         self,
         shipment_id: int,
-        clone_name: str,
+        *,
+        country: str | None = None,
+        clone_name: str | None = None,
+        name: str | None | object = Ellipsis,
+        note: str | None | object = Ellipsis,
+        expected_delivery_date: str | None | object = Ellipsis,
+        label_creation_date: str | None | object = Ellipsis,
+        scanned_in_date: str | None | object = Ellipsis,
+        account_id: int | None | object = Ellipsis,
+        client_team_id: int | None | object = Ellipsis,
+        box_weight: float | None | object = Ellipsis,
+        allow_archived: bool = False,
     ) -> dict[str, Any] | None:
         shipment = await self.get_by_id(shipment_id)
-        if shipment is None or shipment["archived"]:
+        if shipment is None:
+            return None
+        if shipment["archived"] and not allow_archived:
             return None
 
-        clone_name = clone_name.strip()
-        country = (shipment.get("country") or "").strip()
-        display_name = _compose_display_name(country, clone_name)
+        new_country = shipment.get("country") or ""
+        new_clone = shipment.get("clone_name") or ""
+        new_name = shipment.get("name") or ""
+        if country is not None:
+            new_country = country.strip()
+            if not new_country:
+                raise ValueError("Country is required")
+            if len(new_country) > MAX_COUNTRY_LEN:
+                raise ValueError(f"Country is too long (max {MAX_COUNTRY_LEN})")
+        if clone_name is not None:
+            new_clone = clone_name.strip()
+            if not new_clone:
+                raise ValueError("Clone is required")
+            if len(new_clone) > MAX_CLONE_LEN:
+                raise ValueError(f"Clone is too long (max {MAX_CLONE_LEN})")
+
+        assignments: list[str] = []
+        params: list[Any] = []
+
+        if name is not Ellipsis:
+            cleaned = None if name is None else str(name).strip()
+            if cleaned == "":
+                cleaned = None
+            if cleaned and len(cleaned) > MAX_SHIPMENT_NAME_LEN:
+                raise ValueError(f"Name is too long (max {MAX_SHIPMENT_NAME_LEN})")
+            new_name = cleaned or ""
+            assignments.append("name = ?")
+            params.append(cleaned)
+
+        if country is not None or clone_name is not None or name is not Ellipsis:
+            display_name = _compose_display_name(new_country, new_clone, new_name)
+            assignments.extend(["country = ?", "clone_name = ?", "display_name = ?"])
+            params.extend([new_country, new_clone, display_name])
+
+        if note is not Ellipsis:
+            note_value = None if note is None else str(note)
+            if note_value is not None and len(note_value) > MAX_NOTE_LEN:
+                raise ValueError(f"Note is too long (max {MAX_NOTE_LEN})")
+            assignments.append("note = ?")
+            params.append(note_value)
+
+        for field, value in (
+            ("expected_delivery_date", expected_delivery_date),
+            ("label_creation_date", label_creation_date),
+            ("scanned_in_date", scanned_in_date),
+        ):
+            if value is Ellipsis:
+                continue
+            date_value = coerce_iso_date(value) if value else None
+            assignments.append(f"{field} = ?")
+            params.append(date_value)
+            if field == "expected_delivery_date":
+                assignments.append("expected_date = ?")
+                params.append(date_value)
+
+        if account_id is not Ellipsis:
+            if account_id is None:
+                raise ValueError("Account is required")
+            await self._require_account(int(account_id))
+            assignments.append("account_id = ?")
+            params.append(int(account_id))
+
+        if client_team_id is not Ellipsis:
+            team_value = None if client_team_id is None else int(client_team_id)
+            await self._require_team(team_value)
+            assignments.append("client_team_id = ?")
+            params.append(team_value)
+
+        if box_weight is not Ellipsis:
+            assignments.append("box_weight = ?")
+            params.append(validate_box_weight(box_weight) if box_weight is not None else None)
+
+        if not assignments:
+            return shipment
+
         now = _now()
+        assignments.append("updated_at = ?")
+        params.append(now)
+        params.append(shipment_id)
         await self.db.connection.execute(
-            """
-            UPDATE shipments
-            SET clone_name = ?, display_name = ?, updated_at = ?
-            WHERE id = ? AND archived = 0
-            """,
-            (clone_name, display_name, now, shipment_id),
+            f"UPDATE shipments SET {', '.join(assignments)} WHERE id = ?",
+            params,
         )
         await self.db.connection.commit()
         return await self.get_by_id(shipment_id)
+
+    async def update_country(self, shipment_id: int, country: str) -> dict[str, Any] | None:
+        return await self.update_fields(shipment_id, country=country)
+
+    async def update_clone_name(self, shipment_id: int, clone_name: str) -> dict[str, Any] | None:
+        return await self.update_fields(shipment_id, clone_name=clone_name)
 
     async def update_edd(
         self,
         shipment_id: int,
         expected_delivery_date: str,
     ) -> dict[str, Any] | None:
-        shipment = await self.get_by_id(shipment_id)
-        if shipment is None or shipment["archived"]:
-            return None
-
-        edd = normalize_stored_utc(expected_delivery_date)
-        if not edd or try_parse_stored(edd) is None:
-            raise ValueError("expected_delivery_date must be a valid UTC datetime")
-
-        now = _now()
-        await self.db.connection.execute(
-            """
-            UPDATE shipments
-            SET expected_delivery_date = ?,
-                expected_date = ?,
-                updated_at = ?
-            WHERE id = ? AND archived = 0
-            """,
-            (edd, edd, now, shipment_id),
+        date_value = extract_date_component(expected_delivery_date) or coerce_iso_date(
+            expected_delivery_date
         )
-        await self.db.connection.commit()
-        return await self.get_by_id(shipment_id)
-
-    async def update_note(
-        self,
-        shipment_id: int,
-        note: str | None,
-    ) -> dict[str, Any] | None:
-        shipment = await self.get_by_id(shipment_id)
-        if shipment is None or shipment["archived"]:
-            return None
-
-        now = _now()
-        await self.db.connection.execute(
-            """
-            UPDATE shipments
-            SET note = ?, updated_at = ?
-            WHERE id = ? AND archived = 0
-            """,
-            (note, now, shipment_id),
+        return await self.update_fields(
+            shipment_id, expected_delivery_date=date_value
         )
-        await self.db.connection.commit()
-        return await self.get_by_id(shipment_id)
+
+    async def update_note(self, shipment_id: int, note: str | None) -> dict[str, Any] | None:
+        return await self.update_fields(shipment_id, note=note)
 
     async def archive(
         self,
@@ -445,6 +778,31 @@ class ShipmentRepository:
         except Exception:
             logger.exception("Failed to archive shipment id=%s", shipment_id)
             raise
+
+    async def restore(
+        self,
+        shipment_id: int,
+        *,
+        changed_by: int | None = None,
+    ) -> dict[str, Any] | None:
+        shipment = await self.get_by_id(shipment_id)
+        if shipment is None:
+            return None
+        if not shipment["archived"]:
+            return shipment
+
+        now = _now()
+        await self.db.connection.execute(
+            """
+            UPDATE shipments
+            SET archived = 0, updated_at = ?
+            WHERE id = ?
+            """,
+            (now, shipment_id),
+        )
+        await self.db.connection.commit()
+        logger.info("Shipment restored id=%s by=%s", shipment_id, changed_by)
+        return await self.get_by_id(shipment_id)
 
     # --- Reminders ---------------------------------------------------------
 
@@ -481,10 +839,20 @@ class ShipmentRepository:
         remind_at: datetime,
         *,
         created_by: int | None = None,
+        allow_past: bool = False,
     ) -> dict[str, Any]:
         shipment = await self.get_by_id(shipment_id)
         if shipment is None or shipment["archived"]:
             raise ValueError("Shipment not available")
+        if shipment["status"] == DELIVERED_STATUS:
+            raise ValueError("Cannot set a reminder on a delivered shipment")
+
+        if remind_at.tzinfo is None:
+            remind_at = remind_at.replace(tzinfo=timezone.utc)
+        else:
+            remind_at = remind_at.astimezone(timezone.utc)
+        if not allow_past and remind_at <= now_utc():
+            raise ValueError("Reminder must be in the future")
 
         await self.cancel_active_reminders(shipment_id)
         stored = to_store(remind_at)
@@ -532,13 +900,16 @@ class ShipmentRepository:
         cursor = await self.db.connection.execute(
             """
             SELECT r.*,
-                   s.country, s.clone_name, s.display_name, s.status,
-                   s.expected_delivery_date, s.expected_date, s.archived
+                   s.country, s.clone_name, s.name, s.display_name, s.status,
+                   s.expected_delivery_date, s.expected_date, s.archived,
+                   a.name AS account_name
             FROM shipment_reminders r
             JOIN shipments s ON s.id = r.shipment_id
+            LEFT JOIN accounts a ON a.id = s.account_id
             WHERE r.cancelled = 0
               AND r.sent_at IS NULL
               AND s.archived = 0
+              AND s.status != 'delivered'
             ORDER BY r.remind_at ASC, r.id ASC
             """
         )

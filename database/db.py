@@ -1,30 +1,59 @@
-"""SQLite connection helpers and idempotent migrations."""
+"""SQLite connection helpers and exclusive, idempotent migrations."""
 
 from __future__ import annotations
 
+import asyncio
+import fcntl
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import IO, TextIO
 
 import aiosqlite
+
+from utils.dates import extract_date_component
 
 logger = logging.getLogger(__name__)
 
 SCHEMA = """
-PRAGMA foreign_keys = ON;
+CREATE TABLE IF NOT EXISTS accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    archived INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS client_teams (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    archived INTEGER NOT NULL DEFAULT 0
+);
 
 CREATE TABLE IF NOT EXISTS shipments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     country TEXT,
     clone_name TEXT,
+    name TEXT,
     display_name TEXT,
     status TEXT NOT NULL,
     note TEXT,
     expected_date TEXT,
     expected_delivery_date TEXT,
+    account_id INTEGER,
+    client_team_id INTEGER,
+    box_weight REAL,
+    label_creation_date TEXT,
+    scanned_in_date TEXT,
+    delivered_date TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     created_by INTEGER,
-    archived INTEGER NOT NULL DEFAULT 0
+    archived INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (account_id) REFERENCES accounts(id),
+    FOREIGN KEY (client_team_id) REFERENCES client_teams(id)
 );
 
 CREATE TABLE IF NOT EXISTS status_history (
@@ -56,7 +85,49 @@ CREATE INDEX IF NOT EXISTS idx_status_history_shipment
 
 CREATE INDEX IF NOT EXISTS idx_reminders_due
     ON shipment_reminders(cancelled, sent_at, remind_at);
+
+CREATE INDEX IF NOT EXISTS idx_accounts_name
+    ON accounts(name);
+
+CREATE INDEX IF NOT EXISTS idx_client_teams_name
+    ON client_teams(name);
+
+CREATE TABLE IF NOT EXISTS bot_ui_sessions (
+    telegram_user_id INTEGER PRIMARY KEY,
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    current_view TEXT NOT NULL DEFAULT 'home',
+    updated_at TEXT NOT NULL
+);
 """
+
+SCHEMA_STATEMENTS: tuple[str, ...] = tuple(
+    statement.strip()
+    for statement in SCHEMA.split(";")
+    if statement.strip()
+)
+
+MIGRATE_BUSY_TIMEOUT_MS = 30_000
+RUNTIME_BUSY_TIMEOUT_MS = 5_000
+
+NEW_SHIPMENT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("country", "TEXT"),
+    ("clone_name", "TEXT"),
+    ("expected_delivery_date", "TEXT"),
+    ("display_name", "TEXT"),
+    ("expected_date", "TEXT"),
+    ("account_id", "INTEGER"),
+    ("client_team_id", "INTEGER"),
+    ("box_weight", "REAL"),
+    ("label_creation_date", "TEXT"),
+    ("scanned_in_date", "TEXT"),
+    ("delivered_date", "TEXT"),
+    ("name", "TEXT"),
+)
+
+
+def _migration_now() -> str:
+    return datetime.now(timezone.utc).strftime("%d %b %Y %H:%M")
 
 
 def parse_display_name(value: str | None) -> tuple[str, str]:
@@ -74,6 +145,19 @@ def parse_display_name(value: str | None) -> tuple[str, str]:
     return country, clone
 
 
+def _acquire_migrate_lock(lock_path: Path) -> TextIO:
+    handle = lock_path.open("a", encoding="utf-8")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    return handle
+
+
+def _release_migrate_lock(handle: IO[str]) -> None:
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
 class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -87,41 +171,72 @@ class Database:
 
     async def connect(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = await aiosqlite.connect(self.path)
+        self._conn = await aiosqlite.connect(
+            self.path,
+            timeout=MIGRATE_BUSY_TIMEOUT_MS / 1000,
+        )
         self._conn.row_factory = aiosqlite.Row
+        # Busy timeout must be set before WAL conversion or migrate; default is 0
+        # for some lock types and concurrent bot+API startup would fail immediately.
+        await self._conn.execute(f"PRAGMA busy_timeout = {MIGRATE_BUSY_TIMEOUT_MS}")
         await self._conn.execute("PRAGMA foreign_keys = ON")
-        await self._conn.executescript(SCHEMA)
-        await self._migrate()
-        await self._conn.commit()
+        lock_path = Path(str(self.path) + ".migrate.lock")
+        lock_handle = await asyncio.to_thread(_acquire_migrate_lock, lock_path)
+        try:
+            await self._conn.execute("PRAGMA journal_mode = WAL")
+            await self._migrate_with_lock()
+        finally:
+            await asyncio.to_thread(_release_migrate_lock, lock_handle)
+        await self._conn.execute(f"PRAGMA busy_timeout = {RUNTIME_BUSY_TIMEOUT_MS}")
         logger.info("Database ready at %s", self.path)
+
+    async def _migrate_with_lock(self) -> None:
+        """Serialize schema upgrades so bot and API can start together."""
+        await self.connection.commit()
+        await self.connection.execute("BEGIN EXCLUSIVE")
+        try:
+            for statement in SCHEMA_STATEMENTS:
+                await self.connection.execute(statement)
+            await self._migrate()
+            await self.connection.commit()
+        except Exception:
+            logger.exception("Database migration failed; rolling back")
+            try:
+                await self.connection.rollback()
+            except Exception:
+                logger.exception("Rollback after failed migration also failed")
+            raise
 
     async def _table_columns(self, table: str) -> set[str]:
         cursor = await self.connection.execute(f"PRAGMA table_info({table})")
         rows = await cursor.fetchall()
         return {row["name"] for row in rows}
 
-    async def _migrate(self) -> None:
-        cols = await self._table_columns("shipments")
+    async def _table_exists(self, table: str) -> bool:
+        cursor = await self.connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        )
+        return await cursor.fetchone() is not None
 
-        alter_statements: list[str] = []
-        if "country" not in cols:
-            alter_statements.append("ALTER TABLE shipments ADD COLUMN country TEXT")
-        if "clone_name" not in cols:
-            alter_statements.append("ALTER TABLE shipments ADD COLUMN clone_name TEXT")
-        if "expected_delivery_date" not in cols:
-            alter_statements.append(
-                "ALTER TABLE shipments ADD COLUMN expected_delivery_date TEXT"
-            )
-        if "display_name" not in cols:
-            alter_statements.append("ALTER TABLE shipments ADD COLUMN display_name TEXT")
-        if "expected_date" not in cols:
-            alter_statements.append("ALTER TABLE shipments ADD COLUMN expected_date TEXT")
-
-        for sql in alter_statements:
+    async def _add_column(self, name: str, col_type: str) -> None:
+        sql = f"ALTER TABLE shipments ADD COLUMN {name} {col_type}"
+        try:
             await self.connection.execute(sql)
             logger.info("Applied schema change: %s", sql)
+        except aiosqlite.OperationalError as exc:
+            if "duplicate column name" in str(exc).lower():
+                logger.info("Column already present: %s", name)
+                return
+            raise
 
-        # Copy legacy EDD values once
+    async def _migrate(self) -> None:
+        cols = await self._table_columns("shipments")
+        for name, col_type in NEW_SHIPMENT_COLUMNS:
+            if name not in cols:
+                await self._add_column(name, col_type)
+
+        # Copy legacy EDD into expected_delivery_date when that column is empty.
         await self.connection.execute(
             """
             UPDATE shipments
@@ -132,7 +247,6 @@ class Database:
             """
         )
 
-        # Split legacy display_name into country/clone where missing
         cursor = await self.connection.execute(
             """
             SELECT id, display_name, country, clone_name
@@ -159,7 +273,6 @@ class Database:
         if migrated:
             logger.info("Migrated country/clone_name for %s shipment(s)", migrated)
 
-        # Keep display_name in sync for older tooling / fallbacks
         await self.connection.execute(
             """
             UPDATE shipments
@@ -178,39 +291,135 @@ class Database:
             """
         )
 
-        # Normalize already-valid datetime EDD values to ISO UTC; leave free-text alone
+        # Canonical date column is expected_delivery_date (YYYY-MM-DD).
+        # Unparseable free-text is kept in expected_date and cleared from EDD
+        # so the API never treats it as an ISO date.
         cursor = await self.connection.execute(
             """
-            SELECT id, expected_delivery_date
+            SELECT id, expected_delivery_date, expected_date
             FROM shipments
-            WHERE expected_delivery_date IS NOT NULL
-              AND expected_delivery_date != ''
+            WHERE (expected_delivery_date IS NOT NULL AND expected_delivery_date != '')
+               OR (expected_date IS NOT NULL AND expected_date != '')
             """
         )
-        from utils.timefmt import normalize_stored_utc, try_parse_stored
-
+        date_migrated = 0
+        cleared = 0
         for row in await cursor.fetchall():
-            raw = row["expected_delivery_date"]
-            if try_parse_stored(raw) is None:
+            raw_edd = row["expected_delivery_date"]
+            raw_legacy = row["expected_date"]
+            extracted = extract_date_component(raw_edd) or extract_date_component(raw_legacy)
+            if extracted:
+                if extracted != raw_edd:
+                    await self.connection.execute(
+                        """
+                        UPDATE shipments
+                        SET expected_delivery_date = ?
+                        WHERE id = ?
+                        """,
+                        (extracted, row["id"]),
+                    )
+                    date_migrated += 1
                 continue
-            normalized = normalize_stored_utc(raw)
-            if normalized and normalized != raw:
-                await self.connection.execute(
-                    """
-                    UPDATE shipments
-                    SET expected_delivery_date = ?, expected_date = ?
-                    WHERE id = ?
-                    """,
-                    (normalized, normalized, row["id"]),
-                )
+            preserve = (raw_legacy or raw_edd or "").strip() or None
+            await self.connection.execute(
+                """
+                UPDATE shipments
+                SET expected_delivery_date = NULL,
+                    expected_date = ?
+                WHERE id = ?
+                """,
+                (preserve, row["id"]),
+            )
+            if raw_edd:
+                cleared += 1
+        if date_migrated:
+            logger.info(
+                "Migrated %s expected_delivery_date value(s) to YYYY-MM-DD",
+                date_migrated,
+            )
+        if cleared:
+            logger.info(
+                "Moved %s unparseable EDD value(s) to expected_date and cleared expected_delivery_date",
+                cleared,
+            )
 
-        # Indexes that depend on migrated columns
-        await self.connection.execute(
+        assigned = await self.migrate_legacy_clone_to_accounts()
+        if assigned:
+            logger.info(
+                "Assigned accounts from legacy clone values for %s shipment(s)",
+                assigned,
+            )
+
+        for sql in (
+            "CREATE INDEX IF NOT EXISTS idx_shipments_country_clone ON shipments(country, clone_name)",
+            "CREATE INDEX IF NOT EXISTS idx_shipments_account_id ON shipments(account_id)",
+            "CREATE INDEX IF NOT EXISTS idx_shipments_client_team_id ON shipments(client_team_id)",
+            "CREATE INDEX IF NOT EXISTS idx_shipments_expected_delivery_date ON shipments(expected_delivery_date)",
+            "CREATE INDEX IF NOT EXISTS idx_shipments_status ON shipments(status)",
+            "CREATE INDEX IF NOT EXISTS idx_shipments_archived ON shipments(archived)",
+        ):
+            await self.connection.execute(sql)
+
+    async def migrate_legacy_clone_to_accounts(self) -> int:
+        """Assign accounts from legacy clone/company values. Idempotent.
+
+        Only fills NULL account_id. Does not overwrite existing accounts
+        and does not copy clone values into the shipment name field.
+        """
+        cursor = await self.connection.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_shipments_country_clone
-                ON shipments(country, clone_name)
+            SELECT id, clone_name
+            FROM shipments
+            WHERE account_id IS NULL
+              AND clone_name IS NOT NULL
+              AND TRIM(clone_name) != ''
             """
         )
+        rows = await cursor.fetchall()
+        assigned = 0
+        now = _migration_now()
+        for row in rows:
+            company = (row["clone_name"] or "").strip()
+            if not company:
+                continue
+            account_id = await self._get_or_create_account_id(company, now)
+            await self.connection.execute(
+                """
+                UPDATE shipments
+                SET account_id = ?
+                WHERE id = ? AND account_id IS NULL
+                """,
+                (account_id, row["id"]),
+            )
+            assigned += 1
+        return assigned
+
+    async def _get_or_create_account_id(self, name: str, now: str) -> int:
+        cursor = await self.connection.execute(
+            """
+            SELECT id, archived
+            FROM accounts
+            WHERE name = ? COLLATE NOCASE
+            LIMIT 1
+            """,
+            (name,),
+        )
+        existing = await cursor.fetchone()
+        if existing is not None:
+            if existing["archived"]:
+                await self.connection.execute(
+                    "UPDATE accounts SET archived = 0, updated_at = ? WHERE id = ?",
+                    (now, existing["id"]),
+                )
+            return int(existing["id"])
+        cursor = await self.connection.execute(
+            """
+            INSERT INTO accounts (name, created_at, updated_at, archived)
+            VALUES (?, ?, ?, 0)
+            """,
+            (name, now, now),
+        )
+        return int(cursor.lastrowid)
 
     async def close(self) -> None:
         if self._conn is not None:

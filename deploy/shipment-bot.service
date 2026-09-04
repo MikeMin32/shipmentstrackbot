@@ -1,0 +1,22 @@
+[Unit]
+Description=Shipment Tracker Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_LINUX_USER
+Group=YOUR_LINUX_USER
+WorkingDirectory=/opt/shipment-bot/app
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/opt/shipment-bot/app/.env
+ExecStart=/opt/shipment-bot/app/.venv/bin/python bot.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+# The reminder worker runs only in this process. Do not start a second copy.
+# Schema upgrades use an exclusive SQLite lock shared with shipment-api.
+
+[Install]
+WantedBy=multi-user.target

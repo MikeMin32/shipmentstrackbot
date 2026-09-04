@@ -4,6 +4,12 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .env
+frontend/.env
+frontend/.env.*
+*.db
+*.db-wal
+*.db-shm
+*.migrate.lock
 data/*.db
 data/*.db-*
 .pytest_cache/
@@ -11,3 +17,5 @@ data/*.db-*
 .idea/
 .vscode/
 *.log
+frontend/node_modules/
+frontend/dist/

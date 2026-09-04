@@ -9,8 +9,8 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 
 from database.repository import ShipmentRepository
-from keyboards.inline import open_shipment_keyboard
-from utils.formatting import format_reminder_notice
+from bot_ui.format import format_reminder_notice
+from bot_ui.keyboards import open_shipment_keyboard
 
 logger = logging.getLogger(__name__)
 
@@ -18,9 +18,16 @@ POLL_INTERVAL_SECONDS = 30
 
 
 class ReminderWorker:
-    def __init__(self, bot: Bot, repo: ShipmentRepository) -> None:
+    def __init__(
+        self,
+        bot: Bot,
+        repo: ShipmentRepository,
+        *,
+        mini_app_url: str | None = None,
+    ) -> None:
         self.bot = bot
         self.repo = repo
+        self.mini_app_url = mini_app_url
         self._task: asyncio.Task[None] | None = None
         self._stopped = asyncio.Event()
 
@@ -44,7 +51,6 @@ class ReminderWorker:
         logger.info("Reminder worker stopped")
 
     async def _run(self) -> None:
-        # Deliver any overdue reminders immediately on startup
         await self._tick()
         while not self._stopped.is_set():
             try:
@@ -78,7 +84,6 @@ class ReminderWorker:
             await self.repo.db.connection.commit()
             return
 
-        # Claim first to avoid duplicate sends across overlapping ticks
         claimed = await self.repo.mark_reminder_sent(reminder_id)
         if not claimed:
             return
@@ -87,6 +92,8 @@ class ReminderWorker:
             "id": shipment_id,
             "country": row.get("country"),
             "clone_name": row.get("clone_name"),
+            "name": row.get("name"),
+            "account_name": row.get("account_name"),
             "display_name": row.get("display_name"),
             "status": row.get("status"),
             "expected_delivery_date": row.get("expected_delivery_date"),

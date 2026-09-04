@@ -6,9 +6,9 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 
+from config import Config
 from database.repository import ShipmentRepository
 from handlers.common import details_text
-from handlers.start import MAIN_MENU_TEXT
 from keyboards.inline import (
     MenuCB,
     ShipmentCB,
@@ -35,10 +35,13 @@ from utils.formatting import (
     shipment_title,
     status_label,
 )
+from utils.dates import today_in_timezone
 from utils.telegram import answer_callback, safe_edit_text
 from utils.timefmt import UTC_INPUT_FORMAT, format_utc_display
 
 router = Router(name="callbacks")
+
+LEGACY_HOME_TEXT = "<b>📦 Shipments</b>"
 
 
 async def _show_active(callback: CallbackQuery, repo: ShipmentRepository) -> None:
@@ -81,7 +84,7 @@ async def menu_home(callback: CallbackQuery, state: FSMContext) -> None:
     await answer_callback(callback)
     await safe_edit_text(
         callback.message,
-        MAIN_MENU_TEXT,
+        LEGACY_HOME_TEXT,
         reply_markup=main_menu_keyboard(),
     )
 
@@ -272,7 +275,7 @@ async def shipment_create_status_chosen(
         )
         await safe_edit_text(
             callback.message,
-            MAIN_MENU_TEXT,
+            LEGACY_HOME_TEXT,
             reply_markup=main_menu_keyboard(),
         )
         return
@@ -491,7 +494,35 @@ async def shipment_reminder_remove(
     )
 
 
-@router.callback_query(ShipmentCB.filter(F.action.in_({"archive", "complete"})))
+@router.callback_query(ShipmentCB.filter(F.action == "complete"))
+async def shipment_complete(
+    callback: CallbackQuery,
+    callback_data: ShipmentCB,
+    repo: ShipmentRepository,
+    config: Config,
+) -> None:
+    shipment = await repo.get_by_id(callback_data.shipment_id)
+    if shipment is None or shipment["archived"]:
+        await answer_callback(callback, "Shipment not available.", show_alert=True)
+        await _show_active(callback, repo)
+        return
+
+    user = callback.from_user
+    delivered = today_in_timezone(config.app_timezone).isoformat()
+    shipment = await repo.complete(
+        callback_data.shipment_id,
+        changed_by=user.id if user else None,
+        delivered_date=delivered,
+    )
+    if shipment is None:
+        await answer_callback(callback, "Shipment not available.", show_alert=True)
+        await _show_active(callback, repo)
+        return
+    await answer_callback(callback, "Marked delivered")
+    await _show_details(callback, repo, shipment["id"], notice="✅ Marked as delivered")
+
+
+@router.callback_query(ShipmentCB.filter(F.action == "archive"))
 async def shipment_archive_prompt(
     callback: CallbackQuery,
     callback_data: ShipmentCB,
