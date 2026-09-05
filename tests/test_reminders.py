@@ -73,7 +73,7 @@ async def test_due_reminders_skip_delivered_and_archived(tmp_path: Path) -> None
         assert await repo.mark_reminder_sent(reminder_id) is True
         assert await repo.mark_reminder_sent(reminder_id) is False
 
-        worker = ReminderWorker(bot=None, repo=repo, mini_app_url="https://tracker.example.test")
+        worker = ReminderWorker(bot=None, repo=repo)
         assert worker._task is None
     finally:
         await db.close()

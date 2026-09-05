@@ -49,6 +49,8 @@ from domain.status import (
     STATUS_DISPLAY_LABELS,
     STATUS_SHORT,
     status_display_label,
+    status_emoji,
+    status_line,
 )
 from utils.dates import extract_date_component, today_in_timezone
 
@@ -125,11 +127,9 @@ async def view_home(
     page_items, page, pages, total = page_active_shipments(
         shipments, page, size=HOME_PAGE_SIZE
     )
-    counts = await repo.dashboard_counts()
     summary = await accounts.summary()
     text = fmt.format_home(
         page_items=page_items,
-        counts=counts,
         account_line=fmt.format_account_compact(summary),
         today=today,
         page=page,
@@ -269,7 +269,7 @@ async def picker_items_for(
         return [(int(row["id"]), str(row["name"])) for row in rows]
     if kind == "st":
         return [
-            (index, STATUS_DISPLAY_LABELS[status])
+            (index, status_line(status))
             for index, status in enumerate(OPERATIONAL_STATUSES)
         ]
     if kind == "co":
@@ -431,7 +431,7 @@ async def view_all(
         ordered = sort_by_edd(fetched)
         items, page, pages = _page_items(ordered, page, PAGE_SIZE)
         total = len(ordered)
-        title = f"📦 {STATUS_DISPLAY_LABELS.get(status, status).upper()}"
+        title = f"{status_emoji(status)} {STATUS_DISPLAY_LABELS.get(status, status).upper()}"
         filter_label = STATUS_DISPLAY_LABELS.get(status, status)
         short = STATUS_SHORT.get(status, "")
     else:

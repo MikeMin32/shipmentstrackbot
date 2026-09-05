@@ -22,12 +22,9 @@ class ReminderWorker:
         self,
         bot: Bot,
         repo: ShipmentRepository,
-        *,
-        mini_app_url: str | None = None,
     ) -> None:
         self.bot = bot
         self.repo = repo
-        self.mini_app_url = mini_app_url
         self._task: asyncio.Task[None] | None = None
         self._stopped = asyncio.Event()
 

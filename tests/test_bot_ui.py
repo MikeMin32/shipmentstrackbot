@@ -8,9 +8,17 @@ from aiogram.types import Message
 
 from bot_ui.callbacks import DateCB, NavCB, PickCB, ShipCB
 from bot_ui.draft import draft_missing, new_draft
-from bot_ui.format import compact_title, display_title, format_account_compact, format_home, format_human_date
+from bot_ui.format import (
+    compact_title,
+    display_title,
+    format_account_compact,
+    format_home,
+    format_home_date,
+    format_human_date,
+)
 from domain.countries import CODE_INDEX, country_code_to_flag, format_country_code, search_countries
-from bot_ui.grouping import group_active_shipments, page_active_shipments, sort_by_edd
+from bot_ui.grouping import group_home_shipments, page_active_shipments, sort_by_edd
+from domain.status import HOME_STATUS_ORDER, STATUS_EMOJI, status_emoji
 from bot_ui.parse import parse_weight_text
 from bot_ui.calendar import WEEKDAYS
 from bot_ui.keyboards import details_keyboard, draft_keyboard
@@ -92,17 +100,28 @@ async def test_home_groups_and_edd_order(tmp_path) -> None:
         await repo.archive(archived["id"])
 
         active = await repo.list_active()
-        in_transit, working_on = group_active_shipments(active)
-        assert [item["id"] for item in in_transit] == [soon["id"], later["id"], undated["id"]]
-        assert working["id"] == working_on[0]["id"]
+        grouped = dict(group_home_shipments(active))
+        assert [item["id"] for item in grouped["enroute"]] == [later["id"], undated["id"]]
+        assert [item["id"] for item in grouped["out_for_delivery"]] == [soon["id"]]
+        assert working["id"] == grouped["preparing"][0]["id"]
+        assert "make_label" not in grouped
+        assert "standby" not in grouped
         assert all(item["status"] != "delivered" for item in active)
         assert all(not item["archived"] for item in active)
 
         view = await view_home(repo, accounts, tz_name="UTC")
-        assert "SHIPMENT TRACKER" in view.text
-        assert "IN TRANSIT" in view.text
-        assert "WORKING ON" in view.text
-        assert "IN TRANSIT</b> · 3" in view.text
+        assert "SHIPMENT TRACKER" not in view.text
+        assert "active ·" not in view.text
+        assert "in transit" not in view.text.lower()
+        assert "working" not in view.text.lower()
+        assert "IN TRANSIT" not in view.text
+        assert "WORKING ON" not in view.text
+        assert "✈️ <b>EN ROUTE</b>" in view.text
+        assert "🚚 <b>OUT FOR DELIVERY</b>" in view.text
+        assert "📦 <b>PREPARING</b>" in view.text
+        assert "🏷️ <b>MAKE LABEL</b>" not in view.text
+        assert "⏸️ <b>STANDBY</b>" not in view.text
+        assert view.text.index("EN ROUTE") < view.text.index("OUT FOR DELIVERY") < view.text.index("PREPARING")
         assert "1." in view.text
         assert "Acme" in view.text
         assert "Mini App URL is not configured" not in view.text
@@ -415,6 +434,24 @@ def test_home_pages_nine_items() -> None:
     assert [item["id"] for item in page_two] == list(range(10, 13)) + list(range(13, 19))
 
 
+def test_home_orders_within_status_by_edd() -> None:
+    shipments = [
+        {"id": 3, "status": "enroute", "expected_delivery_date": None},
+        {"id": 2, "status": "enroute", "expected_delivery_date": "2026-09-20"},
+        {"id": 1, "status": "enroute", "expected_delivery_date": "2026-09-08"},
+        {"id": 5, "status": "preparing", "expected_delivery_date": None},
+        {"id": 4, "status": "preparing", "expected_delivery_date": "2026-09-07"},
+        {"id": 6, "status": "out_for_delivery", "expected_delivery_date": "2026-09-09"},
+    ]
+    grouped = dict(group_home_shipments(shipments))
+    assert [item["id"] for item in grouped["enroute"]] == [1, 2, 3]
+    assert [item["id"] for item in grouped["out_for_delivery"]] == [6]
+    assert [item["id"] for item in grouped["preparing"]] == [4, 5]
+    page_items, _page, _pages, total = page_active_shipments(shipments, 0, size=9)
+    assert total == 6
+    assert [item["id"] for item in page_items] == [1, 2, 3, 6, 4, 5]
+
+
 def test_sort_by_edd_stable_id() -> None:
     rows = [
         {"id": 2, "expected_delivery_date": "2026-09-08"},
@@ -436,27 +473,99 @@ class _FakeState:
         self._data.update(kwargs)
 
 
-def test_home_format_contains_counts() -> None:
+def test_home_format_uses_status_sections() -> None:
+    today = __import__("datetime").date(2026, 9, 6)
+    text = format_home(
+        page_items=[
+            {"id": 1, "country": "DE", "account_name": "Oner", "status": "enroute", "expected_delivery_date": "2026-09-07"},
+            {"id": 2, "country": "IT", "account_name": "Fargo", "status": "out_for_delivery", "expected_delivery_date": "2026-09-06"},
+            {"id": 3, "country": "LA", "account_name": "Bridge Publications", "status": "preparing", "expected_delivery_date": None},
+            {"id": 4, "country": "CA", "account_name": "Durston", "status": "make_label", "expected_delivery_date": "2026-09-11"},
+            {"id": 5, "country": "LA", "account_name": "Le Bon", "status": "standby", "expected_delivery_date": None},
+            {"id": 6, "country": "ATL", "account_name": "Auto Direct", "status": "standby", "expected_delivery_date": None},
+        ],
+        account_line="Oner 2 · Auto Direct 1 · Blickle 1 · +2 more",
+        today=today,
+    )
+    assert "SHIPMENT TRACKER" not in text
+    assert "active ·" not in text
+    assert "in transit" not in text.lower()
+    assert "IN TRANSIT" not in text
+    assert "WORKING ON" not in text
+    assert text.startswith("✈️ <b>EN ROUTE</b>")
+    assert "1. Oner · 🇩🇪 DE — Tomorrow, Sep 7" in text
+    assert "2. Fargo · 🇮🇹 IT — Today, Sep 6" in text
+    assert "3. Bridge Publications · LA" in text
+    assert "Bridge Publications · LA —" not in text
+    assert "4. Durston · 🇨🇦 CA — Fri, Sep 11" in text
+    assert "5. Le Bon · LA" in text
+    assert "6. Auto Direct · ATL" in text
+    assert "🇩🇪" not in text.split("Le Bon")[1][:20]
+    assert text.index("EN ROUTE") < text.index("OUT FOR DELIVERY") < text.index("PREPARING")
+    assert text.index("PREPARING") < text.index("MAKE LABEL") < text.index("STANDBY")
+    assert "\n\n🚚 <b>OUT FOR DELIVERY</b>\n" in text
+    assert "\n\n📦 <b>PREPARING</b>\n" in text
+    assert "\n\n🏷️ <b>MAKE LABEL</b>\n" in text
+    assert "\n\n⏸️ <b>STANDBY</b>\n" in text
+    assert "\n\n👤 <b>ACCOUNTS</b>\n" in text
+    assert "Oner 2 · Auto Direct 1 · Blickle 1 · +2 more" in text
+    assert text.count("\n\n") == 5
+
+
+def test_home_omits_empty_status_sections() -> None:
     text = format_home(
         page_items=[
             {"id": 1, "country": "DE", "account_name": "Oner", "status": "enroute", "expected_delivery_date": "2026-09-08"},
-            {"id": 2, "country": "CA", "account_name": "Durston", "status": "preparing", "expected_delivery_date": None},
+            {"id": 2, "country": "LA", "account_name": "Le Bon", "status": "standby", "expected_delivery_date": None},
         ],
-        counts={"active": 2, "in_transit": 1, "working": 1},
-        account_line="Oner 1 · Durston 1",
-        today=__import__("datetime").date(2026, 9, 4),
+        account_line="Oner 1",
+        today=__import__("datetime").date(2026, 9, 6),
     )
-    assert "2 active" in text
-    assert "Oner · 🇩🇪 DE" in text
-    assert "Durston · 🇨🇦 CA" in text
-    assert "IN TRANSIT</b> · 1" in text
-    assert "WORKING ON</b> · 1" in text
-    assert "<b>ACCOUNTS</b>" in text
-    assert "Oner 1 · Durston 1" in text
-    assert text.index("in transit") < text.index("IN TRANSIT")
-    assert "\n\n🚚" in text
-    assert "\n\n🛠" in text
-    assert "\n\n👤 <b>ACCOUNTS</b>\n" in text
+    assert "✈️ <b>EN ROUTE</b>" in text
+    assert "⏸️ <b>STANDBY</b>" in text
+    assert "OUT FOR DELIVERY" not in text
+    assert "PREPARING" not in text
+    assert "MAKE LABEL" not in text
+    assert "No shipments" not in text
+    assert "1. Oner · 🇩🇪 DE — Tue, Sep 8" in text
+    assert "2. Le Bon · LA" in text
+
+
+def test_home_date_formatting() -> None:
+    today = __import__("datetime").date(2026, 9, 6)
+    assert format_home_date("2026-09-06", today=today) == "Today, Sep 6"
+    assert format_home_date("2026-09-07", today=today) == "Tomorrow, Sep 7"
+    assert format_home_date("2026-09-07", today=today) != "Tomorrow"
+    assert format_home_date("2026-09-08", today=today) == "Tue, Sep 8"
+    assert format_home_date("2026-09-09", today=today) == "Wed, Sep 9"
+    assert format_home_date("2026-09-11", today=today) == "Fri, Sep 11"
+    assert format_home_date(None, today=today) is None
+    assert "Monday" not in (format_home_date("2026-09-07", today=today) or "")
+    assert "8" in (format_home_date("2026-09-08", today=today) or "")
+
+
+def test_status_emoji_mapping() -> None:
+    assert status_emoji("preparing") == "📦"
+    assert status_emoji("make_label") == "🏷️"
+    assert status_emoji("enroute") == "✈️"
+    assert status_emoji("out_for_delivery") == "🚚"
+    assert status_emoji("standby") == "⏸️"
+    assert status_emoji("delivered") == "✅"
+    assert HOME_STATUS_ORDER == (
+        "enroute",
+        "out_for_delivery",
+        "preparing",
+        "make_label",
+        "standby",
+    )
+    assert set(STATUS_EMOJI) >= {
+        "preparing",
+        "make_label",
+        "enroute",
+        "out_for_delivery",
+        "standby",
+        "delivered",
+    }
 
 
 @pytest.mark.asyncio
@@ -677,6 +786,77 @@ def test_live_bot_sources_do_not_send_mini_app_promo() -> None:
 
 
 @pytest.mark.asyncio
+async def test_workspace_screens_remain_available(tmp_path) -> None:
+    db, repo, accounts, teams, _sessions = await _repos(tmp_path)
+    try:
+        acc = await accounts.create("Ops")
+        shipment = await repo.create(
+            country="DE",
+            name="Oner",
+            clone_name="Oner",
+            status="enroute",
+            account_id=acc["id"],
+            expected_delivery_date="2026-09-08",
+            require_account=True,
+        )
+        home = await view_home(repo, accounts, tz_name="UTC")
+        assert home.text.startswith("✈️ <b>EN ROUTE</b>")
+        details = await view_details(repo, shipment["id"], tz_name="UTC")
+        assert details is not None
+        assert "✈️ En Route" in details.text
+        draft = await view_draft(new_draft(), accounts, teams, tz_name="UTC")
+        assert "NEW SHIPMENT" in draft.text
+        calendar = view_calendar(
+            field="ed",
+            target="s",
+            shipment_id=shipment["id"],
+            year=2026,
+            month=9,
+            current="2026-09-08",
+            tz_name="UTC",
+        )
+        assert "EXPECTED DELIVERY" in calendar.text
+        status_items = [
+            (index, f"{status_emoji(status)} {label}")
+            for index, (status, label) in enumerate(
+                [
+                    ("preparing", "Preparing"),
+                    ("make_label", "Make Label"),
+                    ("enroute", "En Route"),
+                    ("out_for_delivery", "Out For Delivery"),
+                    ("standby", "Standby"),
+                ]
+            )
+        ]
+        status = await view_picker(
+            kind="st",
+            target="s",
+            shipment_id=shipment["id"],
+            page=0,
+            query=None,
+            current_id=2,
+            current_label="✈️ En Route",
+            items=status_items,
+            allow_new=False,
+            allow_search=False,
+            allow_clear=False,
+            columns=1,
+        )
+        texts = [btn.text for row in status.markup.inline_keyboard for btn in row]
+        assert any("En Route" in text for text in texts)
+        from bot_ui.views import view_accounts, view_archive, view_search_results
+
+        search = await view_search_results(repo, "Oner", 0, tz_name="UTC")
+        assert "SEARCH" in search.text
+        archive = await view_archive(repo, 0, tz_name="UTC")
+        assert "ARCHIVE" in archive.text
+        acct = await view_accounts(accounts)
+        assert "ACCOUNTS" in acct.text
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_start_menu_opens_workspace_home(tmp_path, monkeypatch) -> None:
     from handlers.workspace import cmd_menu
     from tests.conftest import make_config
@@ -708,7 +888,7 @@ async def test_start_menu_opens_workspace_home(tmp_path, monkeypatch) -> None:
         assert presented
         view = presented[0]
         assert MINI_APP_PROMO not in view.text
-        assert "SHIPMENT TRACKER" in view.text
+        assert "SHIPMENT TRACKER" not in view.text
         assert "Mini App" not in view.text
         assert "Open the app" not in view.text
         texts = [btn.text for row in view.markup.inline_keyboard for btn in row]

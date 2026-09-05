@@ -5,12 +5,9 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 
-from api.main import create_app
 from database.db import Database
 from database.repository import ShipmentRepository
-from tests.conftest import make_config
 
 
 def _write_legacy_db(path: Path) -> None:
@@ -143,34 +140,35 @@ async def test_concurrent_connect_migrates_once(tmp_path: Path) -> None:
         await second.close()
 
 
-def test_malformed_edd_api_serialization(tmp_path: Path) -> None:
-    db_path = tmp_path / "api-legacy.db"
+@pytest.mark.asyncio
+async def test_malformed_edd_is_not_treated_as_iso_date(tmp_path: Path) -> None:
+    db_path = tmp_path / "legacy-dates.db"
     _write_legacy_db(db_path)
-    config = make_config(tmp_path, database_path=db_path)
-    app = create_app(config)
-    with TestClient(app) as client:
-        ok = client.get("/api/shipments/1")
-        assert ok.status_code == 200
-        body = ok.json()
-        assert body["expected_delivery_date"] == "2026-08-13"
-        assert body["note"] == "keep me"
-        assert body["account"] is not None
-        assert body["account"]["name"] == "Oner"
-        assert body["clone"] == "Oner"
-        malformed = client.get("/api/shipments/2")
-        assert malformed.status_code == 200
-        assert malformed.json()["expected_delivery_date"] is None
-        assert malformed.json()["archived"] is True
-        history = client.get("/api/shipments/1/history")
-        assert history.status_code == 200
-        assert history.json()
-        reminder = client.get("/api/shipments/1/reminder")
-        assert reminder.status_code == 200
-        assert reminder.json()["reminder"] is not None
-        pending = client.get("/api/shipments/3")
-        assert pending.status_code == 200
-        assert pending.json()["status"] == "standby"
-        assert pending.json()["expected_delivery_date"] is None
+    db = Database(db_path)
+    await db.connect()
+    try:
+        repo = ShipmentRepository(db)
+        await repo.migrate_legacy_statuses()
+        ok = await repo.get_by_id(1)
+        assert ok is not None
+        assert ok["expected_delivery_date"] == "2026-08-13"
+        assert ok["note"] == "keep me"
+        assert ok["account_name"] == "Oner"
+        assert ok["clone_name"] == "Oner"
+        malformed = await repo.get_by_id(2)
+        assert malformed is not None
+        assert malformed["expected_delivery_date"] is None
+        assert malformed["archived"] == 1
+        history = await repo.list_history(1)
+        assert history
+        reminder = await repo.get_active_reminder(1)
+        assert reminder is not None
+        pending = await repo.get_by_id(3)
+        assert pending is not None
+        assert pending["status"] == "standby"
+        assert pending["expected_delivery_date"] is None
+    finally:
+        await db.close()
 
 
 @pytest.mark.asyncio

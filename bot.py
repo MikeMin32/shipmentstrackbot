@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 
 async def _configure_telegram_ui(bot: Bot) -> None:
-    """Use Telegram's ordinary command menu. Do not attach a WebApp button."""
+    """Use Telegram's ordinary command menu."""
     try:
         await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
     except Exception:

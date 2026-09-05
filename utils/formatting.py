@@ -9,8 +9,10 @@ from domain.status import (
     DEFAULT_STATUS,
     IN_TRANSIT_STATUSES,
     STATUSES,
+    STATUS_EMOJI as DOMAIN_STATUS_EMOJI,
     WORKING_STATUSES,
     status_display_label,
+    status_emoji as domain_status_emoji,
 )
 from utils.dates import extract_date_component
 from utils.timefmt import format_utc_display
@@ -29,33 +31,16 @@ __all__ = [
     "format_reminder_notice",
 ]
 
-# Summary list: standby has no emoji (client style)
-STATUS_EMOJI: dict[str, str] = {
-    "standby": "",
-    "preparing": "📦",
-    "make_label": "📝",
-    "enroute": "✈️",
-    "out_for_delivery": "🚚",
-    "delivered": "✅",
-}
-
-# Select Shipment grid: every status gets a visible emoji
-SELECTOR_STATUS_EMOJI: dict[str, str] = {
-    "standby": "⚪",
-    "preparing": "📦",
-    "make_label": "📝",
-    "enroute": "✈️",
-    "out_for_delivery": "🚚",
-    "delivered": "✅",
-}
+STATUS_EMOJI: dict[str, str] = dict(DOMAIN_STATUS_EMOJI)
+SELECTOR_STATUS_EMOJI: dict[str, str] = dict(DOMAIN_STATUS_EMOJI)
 
 STATUS_LABELS: dict[str, str] = {
-    "standby": "Standby",
-    "preparing": "📦 Preparing",
-    "make_label": "📝 Make Label",
-    "enroute": "✈️ EnRoute",
-    "out_for_delivery": "🚚 Out For Delivery",
-    "delivered": "✅ Delivered",
+    "standby": f"{DOMAIN_STATUS_EMOJI['standby']} Standby",
+    "preparing": f"{DOMAIN_STATUS_EMOJI['preparing']} Preparing",
+    "make_label": f"{DOMAIN_STATUS_EMOJI['make_label']} Make Label",
+    "enroute": f"{DOMAIN_STATUS_EMOJI['enroute']} En Route",
+    "out_for_delivery": f"{DOMAIN_STATUS_EMOJI['out_for_delivery']} Out For Delivery",
+    "delivered": f"{DOMAIN_STATUS_EMOJI['delivered']} Delivered",
 }
 
 
@@ -64,11 +49,11 @@ def status_label(status: str) -> str:
 
 
 def status_emoji(status: str) -> str:
-    return STATUS_EMOJI.get(status, "")
+    return domain_status_emoji(status)
 
 
 def selector_status_emoji(status: str) -> str:
-    return SELECTOR_STATUS_EMOJI.get(status, "⚪")
+    return domain_status_emoji(status)
 
 
 def esc(value: Any) -> str:
@@ -227,8 +212,7 @@ def format_reminder_notice(shipment: dict[str, Any]) -> str:
         "⏰ <b>Shipment Reminder</b>\n\n"
         f"{esc(shipment_title(shipment))}\n"
         f"Status: {status_label(shipment['status'])}\n"
-        f"Expected delivery: {esc(edd)}\n\n"
-        "Open the tracker to review this shipment."
+        f"Expected delivery: {esc(edd)}"
     )
 
 

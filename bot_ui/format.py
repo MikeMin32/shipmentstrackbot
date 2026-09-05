@@ -2,24 +2,21 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from html import escape
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from domain.countries import format_country_code, format_country_label
-from domain.status import IN_TRANSIT_STATUSES, WORKING_STATUSES, status_display_label
+from domain.status import (
+    home_section_label,
+    status_emoji,
+    status_line as domain_status_line,
+)
 from utils.dates import extract_date_component
 from utils.timefmt import try_parse_stored
 
-STATUS_DOT: dict[str, str] = {
-    "preparing": "🔵",
-    "make_label": "🟣",
-    "enroute": "🟢",
-    "out_for_delivery": "🟠",
-    "standby": "⚪",
-    "delivered": "✅",
-}
+WEEKDAYS_ABBR = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 MONTHS_ABBR = (
     "Jan",
@@ -69,11 +66,11 @@ def compact_title(shipment: dict[str, Any]) -> str:
 
 
 def status_dot(status: str) -> str:
-    return STATUS_DOT.get(status, "⚪")
+    return status_emoji(status)
 
 
 def status_line(status: str) -> str:
-    return f"{status_dot(status)} {status_display_label(status)}"
+    return domain_status_line(status)
 
 
 def format_human_date(
@@ -96,6 +93,26 @@ def format_human_date(
     if include_year:
         return f"{month} {day}, {parsed.year}"
     return f"{month} {day}"
+
+
+def format_home_date(
+    value: str | None,
+    *,
+    today: date,
+) -> str | None:
+    """Compact Home date: Today/Tomorrow or weekday + month + day."""
+    iso = extract_date_component(value)
+    if not iso:
+        return None
+    parsed = date.fromisoformat(iso)
+    month = MONTHS_ABBR[parsed.month - 1]
+    day = str(parsed.day)
+    if parsed == today:
+        return f"Today, {month} {day}"
+    if parsed == today + timedelta(days=1):
+        return f"Tomorrow, {month} {day}"
+    weekday = WEEKDAYS_ABBR[parsed.weekday()]
+    return f"{weekday}, {month} {day}"
 
 
 def format_weight(value: Any, *, empty: str = "—") -> str:
@@ -139,7 +156,6 @@ def _dash(value: str | None) -> str:
 def format_home(
     *,
     page_items: list[dict[str, Any]],
-    counts: dict[str, int],
     account_line: str,
     today: date,
     page: int = 0,
@@ -147,33 +163,30 @@ def format_home(
     total_active: int | None = None,
     page_size: int = 9,
 ) -> str:
-    active = total_active if total_active is not None else counts.get("active", 0)
-    transit_n = counts.get("in_transit", 0)
-    working_n = counts.get("working", 0)
-    lines = [
-        "<b>📦 SHIPMENT TRACKER</b>",
-        f"{active} active · {transit_n} in transit · {working_n} working",
-    ]
-    transit_rows: list[tuple[int, dict[str, Any]]] = []
-    working_rows: list[tuple[int, dict[str, Any]]] = []
+    active = total_active if total_active is not None else len(page_items)
+    lines: list[str] = []
+    sections: list[tuple[str, list[tuple[int, dict[str, Any]]]]] = []
+    current_status: str | None = None
+    current_rows: list[tuple[int, dict[str, Any]]] = []
     for index, item in enumerate(page_items, start=1):
-        status = item.get("status")
-        if status in IN_TRANSIT_STATUSES:
-            transit_rows.append((index, item))
-        elif status in WORKING_STATUSES:
-            working_rows.append((index, item))
-    if transit_rows:
-        lines.append("")
-        lines.append(f"🚚 <b>IN TRANSIT</b> · {transit_n}")
-        for index, item in transit_rows:
-            lines.append(_home_item_line(index, item, today))
-    if working_rows:
-        lines.append("")
-        lines.append(f"🛠 <b>WORKING ON</b> · {working_n}")
-        for index, item in working_rows:
+        status = item.get("status") or ""
+        if status != current_status:
+            if current_status is not None:
+                sections.append((current_status, current_rows))
+            current_status = status
+            current_rows = []
+        current_rows.append((index, item))
+    if current_status is not None:
+        sections.append((current_status, current_rows))
+
+    for section_index, (status, rows) in enumerate(sections):
+        if section_index:
+            lines.append("")
+        emoji = status_emoji(status)
+        lines.append(f"{emoji} <b>{esc(home_section_label(status))}</b>")
+        for index, item in rows:
             lines.append(_home_item_line(index, item, today))
     if not page_items:
-        lines.append("")
         lines.append("No active shipments.")
     if pages > 1 and page_items:
         start = page * page_size + 1
@@ -188,13 +201,14 @@ def format_home(
 
 def _home_item_line(index: int, item: dict[str, Any], today: date, *, with_status: bool = False) -> str:
     title = display_title(item)
-    edd = format_human_date(
+    edd = format_home_date(
         item.get("expected_delivery_date") or item.get("expected_date"),
         today=today,
-        with_year=False,
     )
     prefix = f"{status_dot(item.get('status') or '')} " if with_status else ""
-    return f"{index}. {prefix}{esc(title)}    {edd}"
+    if edd:
+        return f"{index}. {prefix}{esc(title)} — {edd}"
+    return f"{index}. {prefix}{esc(title)}"
 
 
 def format_account_compact(rows: list[dict[str, Any]], *, limit: int = 3) -> str:
@@ -263,7 +277,7 @@ def format_draft(
         _row(req("Account", bool(draft.get("account_id"))), _dash(account_name)),
         _row("Client Team", _dash(team_name)),
         _row("Weight", format_weight(draft.get("box_weight"))),
-        _row("Status", status_display_label(draft.get("status") or "preparing")),
+        _row("Status", status_line(draft.get("status") or "preparing")),
         "",
         _row("Label", format_human_date(draft.get("label_creation_date"), today=today)),
         _row("Scanned", format_human_date(draft.get("scanned_in_date"), today=today)),
@@ -409,9 +423,9 @@ def format_history(
         old = event.get("old_status")
         new = event.get("new_status") or ""
         if old:
-            change = f"{status_display_label(old)} → {status_display_label(new)}"
+            change = f"{status_line(old)} → {status_line(new)}"
         else:
-            change = f"Created as {status_display_label(new)}"
+            change = f"Created as {status_line(new)}"
         lines.append(when)
         lines.append(esc(change))
         lines.append("")
@@ -474,7 +488,7 @@ def format_new_value_prompt(kind: str) -> str:
 
 def format_reminder_notice(shipment: dict[str, Any]) -> str:
     title = esc(compact_title(shipment))
-    status = status_display_label(shipment.get("status") or "")
+    status = status_line(shipment.get("status") or "")
     edd = format_human_date(
         shipment.get("expected_delivery_date") or shipment.get("expected_date"),
         with_year=True,

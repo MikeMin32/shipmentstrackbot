@@ -1,39 +1,65 @@
 from __future__ import annotations
 
+import pytest
 
-def test_account_create_and_summary_counts(client) -> None:
-    first = client.post("/api/accounts", json={"name": "Account A"})
-    second = client.post("/api/accounts", json={"name": "Account B"})
-    assert first.status_code == 201
-    assert second.status_code == 201
-    a_id = first.json()["id"]
-    b_id = second.json()["id"]
+from database.db import Database
+from database.entities import AccountRepository, ClientTeamRepository
+from database.repository import ShipmentRepository
 
-    for _ in range(2):
-        client.post(
-            "/api/shipments",
-            json={"account_id": a_id, "country": "DE", "clone": "Oner"},
+
+@pytest.mark.asyncio
+async def test_account_create_and_summary_counts(tmp_path) -> None:
+    db = Database(tmp_path / "accounts.db")
+    await db.connect()
+    try:
+        accounts = AccountRepository(db)
+        repo = ShipmentRepository(db)
+        first = await accounts.create("Account A")
+        second = await accounts.create("Account B")
+
+        for _ in range(2):
+            await repo.create(
+                country="DE",
+                clone_name="Oner",
+                account_id=first["id"],
+                require_account=True,
+            )
+        created = await repo.create(
+            country="CA",
+            clone_name="Durston",
+            account_id=second["id"],
+            require_account=True,
         )
-    created = client.post(
-        "/api/shipments",
-        json={"account_id": b_id, "country": "CA", "clone": "Durston"},
-    ).json()
-    client.post(f"/api/shipments/{created['id']}/complete")
-    client.post(f"/api/shipments/{created['id']}/archive")
+        await repo.complete(created["id"], delivered_date="2026-09-03")
+        await repo.archive(created["id"])
 
-    summary = client.get("/api/accounts/summary").json()
-    by_name = {row["name"]: row for row in summary}
-    assert by_name["Account A"]["total"] == 2
-    assert by_name["Account A"]["active"] == 2
-    assert by_name["Account B"]["total"] == 1
-    assert by_name["Account B"]["active"] == 0
+        summary = await accounts.summary()
+        by_name = {row["name"]: row for row in summary}
+        assert by_name["Account A"]["total"] == 2
+        assert by_name["Account A"]["active"] == 2
+        assert by_name["Account B"]["total"] == 1
+        assert by_name["Account B"]["active"] == 0
+    finally:
+        await db.close()
 
 
-def test_blank_account_name_rejected(client) -> None:
-    response = client.post("/api/accounts", json={"name": "   "})
-    assert response.status_code in {400, 422}
+@pytest.mark.asyncio
+async def test_blank_account_name_rejected(tmp_path) -> None:
+    db = Database(tmp_path / "blank-account.db")
+    await db.connect()
+    try:
+        with pytest.raises(ValueError, match="Name is required"):
+            await AccountRepository(db).create("   ")
+    finally:
+        await db.close()
 
 
-def test_blank_team_name_rejected(client) -> None:
-    response = client.post("/api/client-teams", json={"name": "   "})
-    assert response.status_code in {400, 422}
+@pytest.mark.asyncio
+async def test_blank_team_name_rejected(tmp_path) -> None:
+    db = Database(tmp_path / "blank-team.db")
+    await db.connect()
+    try:
+        with pytest.raises(ValueError, match="Name is required"):
+            await ClientTeamRepository(db).create("   ")
+    finally:
+        await db.close()

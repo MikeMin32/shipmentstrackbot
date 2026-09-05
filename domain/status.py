@@ -18,7 +18,6 @@ STATUSES: tuple[str, ...] = (
 DEFAULT_STATUS = "preparing"
 DELIVERED_STATUS = "delivered"
 
-# Operational groupings for the Mini App (display logic only).
 WORKING_STATUSES: tuple[str, ...] = (
     "preparing",
     "make_label",
@@ -39,6 +38,32 @@ OPERATIONAL_STATUSES: tuple[str, ...] = (
     "out_for_delivery",
     "standby",
 )
+
+# Home operational list: En Route first, then outbound work, then warehouse work.
+HOME_STATUS_ORDER: tuple[str, ...] = (
+    "enroute",
+    "out_for_delivery",
+    "preparing",
+    "make_label",
+    "standby",
+)
+
+STATUS_EMOJI: dict[str, str] = {
+    "preparing": "📦",
+    "make_label": "🏷️",
+    "enroute": "✈️",
+    "out_for_delivery": "🚚",
+    "standby": "⏸️",
+    "delivered": "✅",
+}
+
+HOME_SECTION_LABELS: dict[str, str] = {
+    "enroute": "EN ROUTE",
+    "out_for_delivery": "OUT FOR DELIVERY",
+    "preparing": "PREPARING",
+    "make_label": "MAKE LABEL",
+    "standby": "STANDBY",
+}
 
 STATUS_SHORT: dict[str, str] = {
     "preparing": "pr",
@@ -69,6 +94,18 @@ STATUS_GROUPS: dict[str, tuple[str, ...]] = {
 
 def status_display_label(status: str) -> str:
     return STATUS_DISPLAY_LABELS.get(status, status)
+
+
+def status_emoji(status: str) -> str:
+    return STATUS_EMOJI.get(status, "⚪")
+
+
+def status_line(status: str) -> str:
+    return f"{status_emoji(status)} {status_display_label(status)}"
+
+
+def home_section_label(status: str) -> str:
+    return HOME_SECTION_LABELS.get(status, status_display_label(status).upper())
 
 
 def status_group(status: str) -> str:

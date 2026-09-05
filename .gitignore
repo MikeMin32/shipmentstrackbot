@@ -4,8 +4,6 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .env
-frontend/.env
-frontend/.env.*
 *.db
 *.db-wal
 *.db-shm
@@ -17,5 +15,3 @@ data/*.db-*
 .idea/
 .vscode/
 *.log
-frontend/node_modules/
-frontend/dist/

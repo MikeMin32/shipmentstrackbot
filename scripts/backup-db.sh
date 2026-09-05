@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copy the SQLite database to a timestamped backup.
-# Prefer stopping shipment-bot and shipment-api first so WAL is checkpointed.
+# Prefer stopping shipment-bot first so WAL is checkpointed.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

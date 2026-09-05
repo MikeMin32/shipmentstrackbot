@@ -177,7 +177,7 @@ class Database:
         )
         self._conn.row_factory = aiosqlite.Row
         # Busy timeout must be set before WAL conversion or migrate; default is 0
-        # for some lock types and concurrent bot+API startup would fail immediately.
+        # for some lock types and concurrent bot startup would fail immediately.
         await self._conn.execute(f"PRAGMA busy_timeout = {MIGRATE_BUSY_TIMEOUT_MS}")
         await self._conn.execute("PRAGMA foreign_keys = ON")
         lock_path = Path(str(self.path) + ".migrate.lock")
@@ -191,7 +191,7 @@ class Database:
         logger.info("Database ready at %s", self.path)
 
     async def _migrate_with_lock(self) -> None:
-        """Serialize schema upgrades so bot and API can start together."""
+        """Serialize schema upgrades so only one process migrates at a time."""
         await self.connection.commit()
         await self.connection.execute("BEGIN EXCLUSIVE")
         try:
@@ -293,7 +293,7 @@ class Database:
 
         # Canonical date column is expected_delivery_date (YYYY-MM-DD).
         # Unparseable free-text is kept in expected_date and cleared from EDD
-        # so the API never treats it as an ISO date.
+        # so date fields never treat free-text as an ISO date.
         cursor = await self.connection.execute(
             """
             SELECT id, expected_delivery_date, expected_date

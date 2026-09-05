@@ -4,23 +4,31 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from fastapi.testclient import TestClient
+import pytest
 
-from api.main import create_app
-from tests.conftest import make_config
+from database.db import Database
+from database.entities import AccountRepository
+from database.repository import ShipmentRepository
+from utils.dates import today_in_timezone
 
 
-def test_delivered_date_uses_app_timezone(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_delivered_date_uses_app_timezone(tmp_path: Path) -> None:
     tz_name = "Pacific/Kiritimati"
-    config = make_config(tmp_path, app_timezone=tz_name)
-    app = create_app(config)
-    with TestClient(app) as client:
-        account = client.post("/api/accounts", json={"name": "TZ"}).json()
-        shipment = client.post(
-            "/api/shipments",
-            json={"account_id": account["id"], "country": "DE", "clone": "Oner"},
-        ).json()
-        completed = client.post(f"/api/shipments/{shipment['id']}/complete")
-        assert completed.status_code == 200
+    db = Database(tmp_path / "tz.db")
+    await db.connect()
+    try:
+        account = await AccountRepository(db).create("TZ")
+        repo = ShipmentRepository(db)
+        shipment = await repo.create(
+            country="DE",
+            clone_name="Oner",
+            account_id=account["id"],
+            require_account=True,
+        )
         expected = datetime.now(ZoneInfo(tz_name)).date().isoformat()
-        assert completed.json()["delivered_date"] == expected
+        completed = await repo.complete(shipment["id"], delivered_date=today_in_timezone(tz_name).isoformat())
+        assert completed is not None
+        assert completed["delivered_date"] == expected
+    finally:
+        await db.close()

@@ -15,6 +15,7 @@ from domain.status import (
     OPERATIONAL_STATUSES,
     STATUS_DISPLAY_LABELS,
     STATUS_SHORT,
+    status_emoji,
 )
 from utils.dates import extract_date_component
 
@@ -414,7 +415,7 @@ def all_filter_rows(counts: dict[str, int], *, current: str, page_status: str) -
         mark = "· " if current == status else ""
         chunk.append(
             InlineKeyboardButton(
-                text=truncate_button(f"{mark}{label} {count}", 32),
+                text=truncate_button(f"{mark}{status_emoji(status)} {label} {count}", 32),
                 callback_data=_nav("al", f=STATUS_SHORT[status]),
             )
         )

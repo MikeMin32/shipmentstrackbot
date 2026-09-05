@@ -34,8 +34,7 @@ class StatusCB(CallbackData, prefix="sts"):
     status: str = ""
 
 
-def main_menu_keyboard(*, mini_app_url: str | None = None) -> InlineKeyboardMarkup:
-    del mini_app_url
+def main_menu_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="📋 Active Shipments", callback_data=MenuCB(action="active").pack())
     builder.button(text="➕ Add Shipment", callback_data=MenuCB(action="add").pack())
@@ -177,12 +176,7 @@ def reminder_menu_keyboard(
     return builder.as_markup()
 
 
-def open_shipment_keyboard(
-    shipment_id: int,
-    *,
-    mini_app_url: str | None = None,
-) -> InlineKeyboardMarkup:
-    del mini_app_url
+def open_shipment_keyboard(shipment_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(
         text="📦 Open Shipment",

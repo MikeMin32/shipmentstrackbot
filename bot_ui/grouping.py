@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from domain.status import IN_TRANSIT_STATUSES, WORKING_STATUSES
+from domain.status import HOME_STATUS_ORDER
 from utils.dates import extract_date_component
 
 
@@ -22,17 +22,34 @@ def sort_by_edd(shipments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(shipments, key=key)
 
 
+def group_home_shipments(
+    shipments: list[dict[str, Any]],
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Group active shipments into Home status sections. Empty sections are omitted."""
+    buckets: dict[str, list[dict[str, Any]]] = {status: [] for status in HOME_STATUS_ORDER}
+    for item in shipments:
+        status = item.get("status")
+        if status in buckets:
+            buckets[status].append(item)
+    return [
+        (status, sort_by_edd(buckets[status]))
+        for status in HOME_STATUS_ORDER
+        if buckets[status]
+    ]
+
+
 def group_active_shipments(
     shipments: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    in_transit = [item for item in shipments if item.get("status") in IN_TRANSIT_STATUSES]
-    working = [item for item in shipments if item.get("status") in WORKING_STATUSES]
-    return sort_by_edd(in_transit), sort_by_edd(working)
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Compatibility alias for Home status grouping."""
+    return group_home_shipments(shipments)
 
 
 def ordered_active_shipments(shipments: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    in_transit, working = group_active_shipments(shipments)
-    return in_transit + working
+    ordered: list[dict[str, Any]] = []
+    for _status, items in group_home_shipments(shipments):
+        ordered.extend(items)
+    return ordered
 
 
 def page_active_shipments(
