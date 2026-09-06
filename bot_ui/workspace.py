@@ -28,6 +28,13 @@ def is_outdated_workspace(
     return int(session["message_id"]) != int(message.message_id)
 
 
+def workspace_needs_reposition(session: dict[str, Any] | None) -> bool:
+    """True when notices were sent after the stored workspace message."""
+    if session is None:
+        return False
+    return bool(int(session.get("needs_reposition") or 0))
+
+
 async def try_delete_message(message: Message | None) -> bool:
     if message is None:
         return False
@@ -54,6 +61,62 @@ async def strip_keyboard(bot: Bot, chat_id: int, message_id: int) -> None:
         logger.debug("Could not strip workspace keyboard", exc_info=True)
 
 
+async def retire_workspace(bot: Bot, chat_id: int, message_id: int) -> None:
+    """Remove the old workspace message, falling back to stripping its keyboard."""
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        return
+    except TelegramBadRequest:
+        pass
+    except Exception:
+        logger.debug("Could not delete workspace message", exc_info=True)
+    await strip_keyboard(bot, chat_id, message_id)
+
+
+async def _record_workspace(
+    sessions: BotSessionRepository,
+    *,
+    user_id: int,
+    chat_id: int,
+    message_id: int,
+    view_name: str,
+) -> None:
+    await sessions.upsert(
+        telegram_user_id=user_id,
+        chat_id=chat_id,
+        message_id=message_id,
+        current_view=view_name,
+        needs_reposition=0,
+    )
+
+
+async def ensure_workspace_at_bottom(
+    bot: Bot,
+    sessions: BotSessionRepository,
+    *,
+    user_id: int,
+    chat_id: int,
+    view: View,
+    session: dict[str, Any] | None,
+) -> int:
+    """Retire the buried workspace and send the requested view as a new message."""
+    if session is not None:
+        await retire_workspace(
+            bot,
+            int(session["chat_id"]),
+            int(session["message_id"]),
+        )
+    sent = await bot.send_message(chat_id, view.text, reply_markup=view.markup)
+    await _record_workspace(
+        sessions,
+        user_id=user_id,
+        chat_id=chat_id,
+        message_id=sent.message_id,
+        view_name=view.name,
+    )
+    return sent.message_id
+
+
 async def present(
     bot: Bot,
     sessions: BotSessionRepository,
@@ -62,21 +125,34 @@ async def present(
     chat_id: int,
     view: View,
     prefer_message_id: int | None = None,
-    adopt_message: Message | None = None,
     force_new: bool = False,
+    from_notice: bool = False,
 ) -> int:
-    """Edit the active workspace or send a new one. Returns the active message_id."""
+    """Edit the active workspace or send a new one. Returns the active message_id.
+
+    Reminder/notice messages are never adopted or edited. If a notice was sent
+    after the stored workspace, the old panel is retired and the requested view
+    is sent as a new message below that history.
+    """
     session = await sessions.get(user_id)
+    if from_notice:
+        # Never treat a reminder/notice as the workspace edit target.
+        prefer_message_id = None
+
+    if workspace_needs_reposition(session) and not force_new:
+        return await ensure_workspace_at_bottom(
+            bot,
+            sessions,
+            user_id=user_id,
+            chat_id=chat_id,
+            view=view,
+            session=session,
+        )
+
     target_id = prefer_message_id
     if target_id is None and session is not None and not force_new:
         target_id = int(session["message_id"])
         chat_id = int(session["chat_id"])
-
-    if adopt_message is not None:
-        target_id = adopt_message.message_id
-        chat_id = adopt_message.chat.id
-        if session is not None and int(session["message_id"]) != target_id:
-            await strip_keyboard(bot, int(session["chat_id"]), int(session["message_id"]))
 
     if force_new:
         target_id = None
@@ -89,11 +165,12 @@ async def present(
                 text=view.text,
                 reply_markup=view.markup,
             )
-            await sessions.upsert(
-                telegram_user_id=user_id,
+            await _record_workspace(
+                sessions,
+                user_id=user_id,
                 chat_id=chat_id,
                 message_id=target_id,
-                current_view=view.name,
+                view_name=view.name,
             )
             return target_id
         except TelegramBadRequest as exc:
@@ -106,24 +183,31 @@ async def present(
                     )
                 except TelegramBadRequest:
                     pass
-                await sessions.upsert(
-                    telegram_user_id=user_id,
+                await _record_workspace(
+                    sessions,
+                    user_id=user_id,
                     chat_id=chat_id,
                     message_id=target_id,
-                    current_view=view.name,
+                    view_name=view.name,
                 )
                 return target_id
             logger.info("Workspace edit failed (%s); sending a new panel", exc)
 
     if session is not None:
-        await strip_keyboard(bot, int(session["chat_id"]), int(session["message_id"]))
+        if workspace_needs_reposition(session):
+            await retire_workspace(
+                bot, int(session["chat_id"]), int(session["message_id"])
+            )
+        else:
+            await strip_keyboard(bot, int(session["chat_id"]), int(session["message_id"]))
 
     sent = await bot.send_message(chat_id, view.text, reply_markup=view.markup)
-    await sessions.upsert(
-        telegram_user_id=user_id,
+    await _record_workspace(
+        sessions,
+        user_id=user_id,
         chat_id=chat_id,
         message_id=sent.message_id,
-        current_view=view.name,
+        view_name=view.name,
     )
     return sent.message_id
 
@@ -133,7 +217,7 @@ async def present_from_callback(
     sessions: BotSessionRepository,
     view: View,
     *,
-    adopt: bool = False,
+    from_notice: bool = False,
 ) -> None:
     if callback.message is None or not isinstance(callback.message, Message):
         return
@@ -147,8 +231,8 @@ async def present_from_callback(
         user_id=user.id,
         chat_id=callback.message.chat.id,
         view=view,
-        prefer_message_id=None if adopt else callback.message.message_id,
-        adopt_message=callback.message if adopt else None,
+        prefer_message_id=None if from_notice else callback.message.message_id,
+        from_notice=from_notice,
     )
 
 
@@ -166,6 +250,8 @@ async def refresh_other_homes(
     rows = await sessions.list_by_view("home")
     for row in rows:
         if int(row["telegram_user_id"]) == except_user_id:
+            continue
+        if workspace_needs_reposition(row):
             continue
         try:
             view = await view_home(repo, accounts, tz_name=tz_name)

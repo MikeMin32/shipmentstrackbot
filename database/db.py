@@ -99,7 +99,8 @@ CREATE TABLE IF NOT EXISTS bot_ui_sessions (
     chat_id INTEGER NOT NULL,
     message_id INTEGER NOT NULL,
     current_view TEXT NOT NULL DEFAULT 'home',
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    needs_reposition INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -383,6 +384,15 @@ class Database:
                 "Moved %s unparseable EDD value(s) to expected_date and cleared expected_delivery_date",
                 cleared,
             )
+
+        if await self._table_exists("bot_ui_sessions"):
+            session_cols = await self._table_columns("bot_ui_sessions")
+            if "needs_reposition" not in session_cols:
+                await self.connection.execute(
+                    "ALTER TABLE bot_ui_sessions "
+                    "ADD COLUMN needs_reposition INTEGER NOT NULL DEFAULT 0"
+                )
+                logger.info("Applied schema change: bot_ui_sessions.needs_reposition")
 
         assigned = await self.migrate_legacy_clone_to_accounts()
         if assigned:

@@ -57,6 +57,6 @@ class RemCB(CallbackData, prefix="r"):
 
 
 class OpenCB(CallbackData, prefix="o"):
-    """Open shipment from a reminder notification (may adopt the message)."""
+    """Open shipment from a reminder notification without editing the notice."""
 
     i: int

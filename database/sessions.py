@@ -31,25 +31,47 @@ class BotSessionRepository:
         chat_id: int,
         message_id: int,
         current_view: str,
+        needs_reposition: int = 0,
     ) -> dict[str, Any]:
         now = _now()
         await self.db.connection.execute(
             """
             INSERT INTO bot_ui_sessions (
-                telegram_user_id, chat_id, message_id, current_view, updated_at
-            ) VALUES (?, ?, ?, ?, ?)
+                telegram_user_id, chat_id, message_id, current_view,
+                updated_at, needs_reposition
+            ) VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(telegram_user_id) DO UPDATE SET
                 chat_id = excluded.chat_id,
                 message_id = excluded.message_id,
                 current_view = excluded.current_view,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                needs_reposition = excluded.needs_reposition
             """,
-            (telegram_user_id, chat_id, message_id, current_view, now),
+            (
+                telegram_user_id,
+                chat_id,
+                message_id,
+                current_view,
+                now,
+                int(needs_reposition),
+            ),
         )
         await self.db.connection.commit()
         session = await self.get(telegram_user_id)
         assert session is not None
         return session
+
+    async def mark_needs_reposition(self, telegram_user_id: int) -> None:
+        """Flag that notices were sent after the active workspace message."""
+        await self.db.connection.execute(
+            """
+            UPDATE bot_ui_sessions
+            SET needs_reposition = 1, updated_at = ?
+            WHERE telegram_user_id = ?
+            """,
+            (_now(), telegram_user_id),
+        )
+        await self.db.connection.commit()
 
     async def set_view(self, telegram_user_id: int, current_view: str) -> None:
         await self.db.connection.execute(

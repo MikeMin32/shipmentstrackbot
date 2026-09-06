@@ -353,7 +353,7 @@ async def show_current(
     teams: ClientTeamRepository,
     sessions: BotSessionRepository,
     config: Config,
-    adopt: bool = False,
+    from_notice: bool = False,
     force_new: bool = False,
 ) -> None:
     frame = await current_frame(state)
@@ -361,7 +361,9 @@ async def show_current(
         frame, repo=repo, accounts=accounts, teams=teams, state=state, config=config
     )
     if callback is not None:
-        await present_from_callback(callback, sessions, view, adopt=adopt)
+        await present_from_callback(
+            callback, sessions, view, from_notice=from_notice
+        )
         return
     if message is None or message.from_user is None:
         return
@@ -1134,7 +1136,7 @@ async def cb_open_from_reminder(
         teams=teams,
         sessions=sessions,
         config=config,
-        adopt=True,
+        from_notice=True,
     )
 
 

@@ -334,6 +334,9 @@ async def test_session_upsert_and_home_view(tmp_path) -> None:
         row = await sessions.get(111)
         assert row is not None
         assert row["message_id"] == 333
+        assert int(row["needs_reposition"] or 0) == 0
+        await sessions.mark_needs_reposition(111)
+        assert int((await sessions.get(111))["needs_reposition"]) == 1
         homes = await sessions.list_by_view("home")
         assert len(homes) == 1
         await sessions.set_view(111, "details")

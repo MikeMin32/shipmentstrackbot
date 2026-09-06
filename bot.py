@@ -92,6 +92,7 @@ async def main() -> None:
         recipient_ids=config.allowed_user_ids,
         tz_name=config.app_timezone,
         reminder_hour=config.edd_reminder_hour,
+        sessions=sessions,
     )
     worker.start()
 

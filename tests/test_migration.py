@@ -172,6 +172,42 @@ async def test_malformed_edd_is_not_treated_as_iso_date(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_existing_sessions_table_gains_needs_reposition(tmp_path: Path) -> None:
+    db_path = tmp_path / "old-sessions.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE bot_ui_sessions (
+            telegram_user_id INTEGER PRIMARY KEY,
+            chat_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            current_view TEXT NOT NULL DEFAULT 'home',
+            updated_at TEXT NOT NULL
+        );
+        INSERT INTO bot_ui_sessions (
+            telegram_user_id, chat_id, message_id, current_view, updated_at
+        ) VALUES (111, 222, 333, 'home', 't');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db = Database(db_path)
+    await db.connect()
+    try:
+        cols = await db._table_columns("bot_ui_sessions")
+        assert "needs_reposition" in cols
+        cursor = await db.connection.execute(
+            "SELECT needs_reposition FROM bot_ui_sessions WHERE telegram_user_id = 111"
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        assert int(row["needs_reposition"]) == 0
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_wal_busy_timeout_and_foreign_keys(tmp_path: Path) -> None:
     db = Database(tmp_path / "pragma.db")
     await db.connect()

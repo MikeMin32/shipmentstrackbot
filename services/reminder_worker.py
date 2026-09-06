@@ -11,6 +11,7 @@ from aiogram.exceptions import TelegramAPIError
 from bot_ui.format import format_edd_reminder_notice, format_reminder_notice
 from bot_ui.keyboards import open_shipment_keyboard
 from database.repository import ShipmentRepository
+from database.sessions import BotSessionRepository
 
 logger = logging.getLogger(__name__)
 
@@ -26,14 +27,21 @@ class ReminderWorker:
         recipient_ids: frozenset[int] | None = None,
         tz_name: str = "UTC",
         reminder_hour: int = 9,
+        sessions: BotSessionRepository | None = None,
     ) -> None:
         self.bot = bot
         self.repo = repo
         self.recipient_ids = recipient_ids or frozenset()
         self.tz_name = tz_name
         self.reminder_hour = reminder_hour
+        self.sessions = sessions
         self._task: asyncio.Task[None] | None = None
         self._stopped = asyncio.Event()
+
+    async def _mark_workspace_buried(self, user_id: int) -> None:
+        if self.sessions is None:
+            return
+        await self.sessions.mark_needs_reposition(int(user_id))
 
     def start(self) -> None:
         if self._task is not None and not self._task.done():
@@ -122,6 +130,7 @@ class ReminderWorker:
                 text=text,
                 reply_markup=open_shipment_keyboard(shipment_id),
             )
+            await self._mark_workspace_buried(int(user_id))
             logger.info(
                 "Reminder delivered id=%s shipment_id=%s user=%s",
                 reminder_id,
@@ -181,6 +190,7 @@ class ReminderWorker:
                     text=text,
                     reply_markup=open_shipment_keyboard(shipment_id),
                 )
+                await self._mark_workspace_buried(int(user_id))
                 delivered += 1
             except TelegramAPIError:
                 logger.exception(
