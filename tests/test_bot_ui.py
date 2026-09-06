@@ -241,24 +241,61 @@ def test_unit_quantity_display_and_notice() -> None:
     assert "kg" not in draft
 
     assert format_edd_reminder_notice(
-        {"name": "Oner Active", "unit_quantity": 5, "client_team_name": "Stealth"},
+        {
+            "name": "Oner Active",
+            "country": "DE",
+            "unit_quantity": 5,
+            "client_team_name": "Stealth",
+        },
         hours=48,
-    ) == "Oner Active (5u) shipment expected delivery to Stealth in 48 hrs; check tracking."
-    assert format_edd_reminder_notice(
-        {"name": "Oner Active", "unit_quantity": 5, "client_team_name": "Stealth"},
-        hours=24,
-    ) == "Oner Active (5u) shipment expected delivery to Stealth in 24 hrs; check tracking."
-    assert format_edd_reminder_notice(
-        {"name": "Oner Active", "client_team_name": "Stealth"},
-        hours=48,
-    ) == "Oner Active shipment expected delivery to Stealth in 48 hrs; check tracking."
-    assert format_edd_reminder_notice(
-        {"name": "Oner Active", "unit_quantity": 5},
-        hours=48,
-    ) == "Oner Active (5u) shipment expected delivery in 48 hrs; check tracking."
-    assert format_edd_reminder_notice({}, hours=24) == (
-        "Shipment expected delivery in 24 hrs; check tracking."
+    ) == (
+        "🇩🇪 <b>Oner Active</b> (<i>5u</i>) shipment expected delivery to "
+        "<b>Stealth</b> in <b>48 hrs</b>; check tracking 🔎"
     )
+    assert format_edd_reminder_notice(
+        {
+            "name": "Oner Active",
+            "country": "DE",
+            "unit_quantity": 5,
+            "client_team_name": "Stealth",
+        },
+        hours=24,
+    ) == (
+        "🇩🇪 <b>Oner Active</b> (<i>5u</i>) shipment expected delivery to "
+        "<b>Stealth</b> in <b>24 hrs</b>; check tracking 🔎"
+    )
+    assert format_edd_reminder_notice(
+        {"name": "Oner Active", "country": "DE", "client_team_name": "Stealth"},
+        hours=48,
+    ) == (
+        "🇩🇪 <b>Oner Active</b> shipment expected delivery to "
+        "<b>Stealth</b> in <b>48 hrs</b>; check tracking 🔎"
+    )
+    assert format_edd_reminder_notice(
+        {"name": "Oner Active", "country": "DE", "unit_quantity": 5},
+        hours=48,
+    ) == (
+        "🇩🇪 <b>Oner Active</b> (<i>5u</i>) shipment expected delivery "
+        "in <b>48 hrs</b>; check tracking 🔎"
+    )
+    assert format_edd_reminder_notice({}, hours=24) == (
+        "Shipment expected delivery in <b>24 hrs</b>; check tracking 🔎"
+    )
+    assert format_edd_reminder_notice(
+        {"name": "Oner Active", "country": "ATL", "unit_quantity": 5, "client_team_name": "Stealth"},
+        hours=48,
+    ) == (
+        "<b>Oner Active</b> (<i>5u</i>) shipment expected delivery to "
+        "<b>Stealth</b> in <b>48 hrs</b>; check tracking 🔎"
+    )
+    escaped = format_edd_reminder_notice(
+        {"name": "A & B <x>", "country": "DE", "client_team_name": "Stealth > HQ"},
+        hours=24,
+    )
+    assert escaped.startswith("🇩🇪 <b>A &amp; B &lt;x&gt;</b>")
+    assert "<b>Stealth &gt; HQ</b>" in escaped
+    assert "<b>24 hrs</b>" in escaped
+    assert escaped.endswith("check tracking 🔎")
 
 
 def test_outdated_workspace_detects_old_message() -> None:
@@ -743,12 +780,13 @@ def _date_field_buttons(markup) -> dict[str, DateCB]:
     return found
 
 
-def test_create_edit_buttons_say_unit_quantity() -> None:
+def test_create_edit_buttons_say_units() -> None:
     details = details_keyboard({"id": 11, "archived": 0, "status": "enroute"})
     draft = draft_keyboard()
     for markup in (details, draft):
         texts = [btn.text for row in markup.inline_keyboard for btn in row]
-        assert "Unit quantity" in texts
+        assert "🔢 Units" in texts
+        assert "Unit quantity" not in texts
         assert "Weight" not in texts
         assert not any("kg" in text.lower() for text in texts)
 

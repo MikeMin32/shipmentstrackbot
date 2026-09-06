@@ -145,7 +145,7 @@ def details_keyboard(shipment: dict[str, Any]) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="👥 Team", callback_data=_pick("o", "tm", "s", shipment_id=sid)),
         )
         builder.row(
-            InlineKeyboardButton(text="Unit quantity", callback_data=_ship("wt", sid)),
+            InlineKeyboardButton(text="🔢 Units", callback_data=_ship("wt", sid)),
             InlineKeyboardButton(text="📝 Note", callback_data=_ship("nt", sid)),
         )
         builder.row(
@@ -179,7 +179,7 @@ def draft_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="👥 Team", callback_data=_pick("o", "tm", "d")),
     )
     builder.row(
-        InlineKeyboardButton(text="Unit quantity", callback_data=_nav("wt")),
+        InlineKeyboardButton(text="🔢 Units", callback_data=_nav("wt")),
         InlineKeyboardButton(text="📦 Status", callback_data=_pick("o", "st", "d")),
     )
     builder.row(

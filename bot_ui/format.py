@@ -7,7 +7,12 @@ from html import escape
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from domain.countries import format_country_code, format_country_label
+from domain.countries import (
+    country_code_to_flag,
+    format_country_code,
+    format_country_label,
+    should_show_flag,
+)
 from domain.status import (
     home_section_label,
     status_emoji,
@@ -471,24 +476,33 @@ def format_unit_quantity_prompt(current: Any) -> str:
 
 
 def format_edd_reminder_notice(shipment: dict[str, Any], *, hours: int) -> str:
-    """Plain operational notice for Expected Delivery 48h/24h reminders."""
+    """Expected Delivery 48h/24h notice. HTML; escape all dynamic values."""
     name = (shipment.get("name") or "").strip()
     if not name:
         name = (shipment.get("account_name") or "").strip() or (shipment.get("clone_name") or "").strip()
     qty = format_unit_quantity_compact(shipment.get("unit_quantity"))
     team = (shipment.get("client_team_name") or "").strip()
+    flag = (
+        country_code_to_flag(shipment.get("country"))
+        if should_show_flag(shipment.get("country"))
+        else None
+    )
+    prefix = f"{flag} " if flag else ""
 
     if name:
-        head = f"{esc(name)} ({esc(qty)})" if qty else esc(name)
+        head = f"{prefix}<b>{esc(name)}</b>"
+        if qty:
+            head = f"{head} (<i>{esc(qty)}</i>)"
         lead = f"{head} shipment expected delivery"
     elif qty:
-        lead = f"({esc(qty)}) shipment expected delivery"
+        lead = f"{prefix}(<i>{esc(qty)}</i>) shipment expected delivery"
     else:
-        lead = "Shipment expected delivery"
+        lead = f"{prefix}Shipment expected delivery"
 
+    hours_text = f"<b>{int(hours)} hrs</b>"
     if team:
-        return f"{lead} to {esc(team)} in {hours} hrs; check tracking."
-    return f"{lead} in {hours} hrs; check tracking."
+        return f"{lead} to <b>{esc(team)}</b> in {hours_text}; check tracking 🔎"
+    return f"{lead} in {hours_text}; check tracking 🔎"
 
 
 def format_note_prompt() -> str:
