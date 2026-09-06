@@ -167,11 +167,13 @@ def test_display_title_name_first_then_flagged_country() -> None:
         compact_title({"name": None, "country": "DE", "account_name": "Oner", "clone_name": "Oner", "id": 1})
         == "Oner · 🇩🇪 DE"
     )
-    assert display_title({"name": "Kal", "country": "ATL", "id": 2}) == "Kal · ATL"
-    assert display_title({"name": None, "country": "LA", "account_name": "Le Bon", "id": 3}) == "Le Bon · LA"
+    assert display_title({"name": "Kal", "country": "ATL", "id": 2}) == "Kal · 🇺🇸 ATL"
+    assert display_title({"name": None, "country": "LA", "account_name": "Le Bon", "id": 3}) == "Le Bon · 🇺🇸 LA"
     assert country_code_to_flag("de") == "🇩🇪"
     assert country_code_to_flag("ATL") is None
-    assert format_country_code("LA") == "LA"
+    assert format_country_code("LA") == "🇺🇸 LA"
+    assert format_country_code("ATL") == "🇺🇸 ATL"
+    assert "🇺🇸 US LA" not in format_country_code("LA")
     germany = search_countries("German")
     assert any(label.endswith("Germany") for _index, label in germany)
 
@@ -240,6 +242,16 @@ def test_unit_quantity_display_and_notice() -> None:
     assert "Weight" not in draft
     assert "kg" not in draft
 
+    alias_draft = format_draft(
+        {"name": "Bridge", "country": "LA", "status": "preparing"},
+        account_name=None,
+        team_name=None,
+        today=today,
+    )
+    assert "🇺🇸 LA" in alias_draft
+    assert "Laos" not in alias_draft
+    assert "🇺🇸 US LA" not in alias_draft
+
     assert format_edd_reminder_notice(
         {
             "name": "Oner Active",
@@ -285,8 +297,26 @@ def test_unit_quantity_display_and_notice() -> None:
         {"name": "Oner Active", "country": "ATL", "unit_quantity": 5, "client_team_name": "Stealth"},
         hours=48,
     ) == (
-        "<b>Oner Active</b> <i>5u</i> shipment expected delivery to "
+        "🇺🇸 <b>Oner Active</b> <i>5u</i> shipment expected delivery to "
         "<b>Stealth</b> in <b>48 hrs</b>; check tracking"
+    )
+    assert format_edd_reminder_notice(
+        {"name": "Bridge Publications", "country": "LA", "unit_quantity": 5, "client_team_name": "Reznov"},
+        hours=24,
+    ) == (
+        "🇺🇸 <b>Bridge Publications</b> <i>5u</i> shipment expected delivery to "
+        "<b>Reznov</b> in <b>24 hrs</b>; check tracking"
+    )
+    unknown = format_edd_reminder_notice(
+        {"name": "Mystery", "country": "XYZ", "unit_quantity": 2, "client_team_name": "Reznov"},
+        hours=24,
+    )
+    assert unknown.startswith("<b>Mystery</b>")
+    assert "🏳️" not in unknown
+    assert "XYZ" not in unknown
+    assert "🇺🇸 US" not in format_edd_reminder_notice(
+        {"name": "Bridge Publications", "country": "LA", "unit_quantity": 5, "client_team_name": "Reznov"},
+        hours=24,
     )
     escaped = format_edd_reminder_notice(
         {"name": "A & B <x>", "country": "DE", "client_team_name": "Stealth > HQ"},
@@ -361,7 +391,8 @@ async def test_shipment_open_details_and_malformed_id(tmp_path) -> None:
         view = await view_details(repo, shipment["id"], tz_name="UTC")
         assert view is not None
         assert "#{}".format(shipment["id"]) in view.text
-        assert "ATL" in view.text
+        assert "🇺🇸 ATL" in view.text
+        assert "🇺🇸 US ATL" not in view.text
         assert "Ops" in view.text
         assert "Kal" not in view.text
         assert "Clone" not in view.text
@@ -601,12 +632,13 @@ def test_home_format_uses_status_sections() -> None:
     assert text.startswith("🚚 <b>OUT FOR DELIVERY</b>\n")
     assert "1. Fargo · 🇮🇹 IT — Today, Sep 6" in text
     assert "2. Oner · 🇩🇪 DE — Tomorrow, Sep 7" in text
-    assert "3. Bridge Publications · LA" in text
-    assert "Bridge Publications · LA —" not in text
+    assert "3. Bridge Publications · 🇺🇸 LA" in text
+    assert "Bridge Publications · 🇺🇸 LA —" not in text
     assert "4. Durston · 🇨🇦 CA — Fri, Sep 11" in text
-    assert "5. Le Bon · LA" in text
-    assert "6. Auto Direct · ATL" in text
-    assert "🇩🇪" not in text.split("Le Bon")[1][:20]
+    assert "5. Le Bon · 🇺🇸 LA" in text
+    assert "6. Auto Direct · 🇺🇸 ATL" in text
+    assert "🇺🇸 US LA" not in text
+    assert "🇺🇸 US ATL" not in text
     assert text.index("OUT FOR DELIVERY") < text.index("EN ROUTE") < text.index("PREPARING")
     assert text.index("PREPARING") < text.index("MAKE LABEL") < text.index("STANDBY")
     assert "\n\n✈️ <b>EN ROUTE</b>\n" in text
@@ -634,7 +666,7 @@ def test_home_omits_empty_status_sections() -> None:
     assert "MAKE LABEL" not in text
     assert "No shipments" not in text
     assert "1. Oner · 🇩🇪 DE — Tue, Sep 8" in text
-    assert "2. Le Bon · LA" in text
+    assert "2. Le Bon · 🇺🇸 LA" in text
 
 
 def test_home_date_formatting() -> None:

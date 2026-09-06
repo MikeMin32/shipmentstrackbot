@@ -184,9 +184,13 @@ COUNTRIES: tuple[tuple[str, str], ...] = (
     ("ZW", "Zimbabwe"),
 )
 
-# Two-letter values that exist as ISO codes but are used as city/location
-# labels in this project's legacy shipment data. Do not invent flags for them.
-LEGACY_LOCATION_CODES: frozenset[str] = frozenset({"LA"})
+# Shipment location abbreviations -> ISO country used only for flag generation.
+# Checked before ISO lookup so colliding codes (LA is also Laos) keep the
+# project's meaning. Add new aliases here; do not special-case them in UI code.
+LOCATION_COUNTRY_ALIASES: dict[str, str] = {
+    "LA": "US",
+    "ATL": "US",
+}
 
 DEFAULT_RECENT_CODES: tuple[str, ...] = ("US", "DE", "CA", "IT", "NL", "AU")
 
@@ -210,37 +214,71 @@ def country_code_to_flag(code: str | None) -> str | None:
     return "".join(chr(0x1F1E6 + ord(char) - ord("A")) for char in raw)
 
 
+def resolve_country_code(value: str | None) -> str | None:
+    """ISO country for flag generation. Preserves the caller's display label.
+
+    Aliases are resolved before ISO codes so LA maps to US, not Laos.
+    Unknown values return None (no placeholder flag).
+    """
+    raw = normalize_country_code(value)
+    if not raw:
+        return None
+    alias = LOCATION_COUNTRY_ALIASES.get(raw)
+    if alias:
+        return alias
+    if is_iso_country_code(raw):
+        return raw
+    return None
+
+
+def flag_for_location(value: str | None) -> str | None:
+    """Flag emoji for a stored country or location, or None if unresolved."""
+    resolved = resolve_country_code(value)
+    if not resolved:
+        return None
+    return country_code_to_flag(resolved)
+
+
 def should_show_flag(code: str | None) -> bool:
-    raw = normalize_country_code(code)
-    if raw in LEGACY_LOCATION_CODES:
-        return False
-    return is_iso_country_code(raw)
+    return flag_for_location(code) is not None
 
 
 def format_country_code(code: str | None, *, empty: str = "") -> str:
-    """Compact list form: '🇩🇪 DE' for valid ISO, otherwise the raw value."""
+    """Compact list form: '🇩🇪 DE' or '🇺🇸 LA'. Display stays the original label."""
     raw = (code or "").strip()
     if not raw:
         return empty
-    if should_show_flag(raw):
-        flag = country_code_to_flag(raw)
-        return f"{flag} {normalize_country_code(raw)}" if flag else raw
-    return raw
+    flag = flag_for_location(raw)
+    if not flag:
+        return raw
+    return f"{flag} {normalize_country_code(raw)}"
 
 
 def format_country_label(code: str | None) -> str:
-    """Picker form: '🇩🇪 Germany' for valid ISO, otherwise the raw value."""
+    """Picker form: '🇩🇪 Germany' for ISO. Location aliases are not rewritten."""
     raw = (code or "").strip()
     if not raw:
         return ""
     normalized = normalize_country_code(raw)
     name = CODE_TO_NAME.get(normalized)
-    if name and should_show_flag(normalized):
+    if name:
+        # Keep picker ISO names. Aliased codes (LA) stay the country name,
+        # without applying the shipment-location flag.
+        if normalized in LOCATION_COUNTRY_ALIASES:
+            return name
         flag = country_code_to_flag(normalized)
         return f"{flag} {name}" if flag else name
-    if name:
-        return name
-    return raw
+    return format_country_code(raw)
+
+
+def format_stored_country(code: str | None, *, empty: str = "") -> str:
+    """Shipment-facing country/location (Home, details, draft current value)."""
+    raw = (code or "").strip()
+    if not raw:
+        return empty
+    if normalize_country_code(raw) in LOCATION_COUNTRY_ALIASES or not is_iso_country_code(raw):
+        return format_country_code(raw)
+    return format_country_label(raw)
 
 
 def country_code_from_index(index: int) -> str | None:
@@ -258,7 +296,7 @@ def recent_country_items(used_codes: list[str], *, limit: int = 6) -> list[tuple
     ordered: list[str] = []
     for raw in used_codes:
         code = normalize_country_code(raw)
-        if not is_iso_country_code(code) or code in LEGACY_LOCATION_CODES or code in seen:
+        if not is_iso_country_code(code) or code in LOCATION_COUNTRY_ALIASES or code in seen:
             continue
         seen.add(code)
         ordered.append(code)

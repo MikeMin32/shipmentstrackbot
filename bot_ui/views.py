@@ -40,7 +40,7 @@ from database.repository import ShipmentRepository
 from domain.countries import (
     CODE_INDEX,
     country_picker_items,
-    format_country_label,
+    format_stored_country,
     recent_country_items,
     search_countries,
 )
@@ -349,7 +349,7 @@ async def current_picker_value(
         if not value:
             return (None, None)
         index = CODE_INDEX.get(value.upper())
-        return (index, format_country_label(value))
+        return (index, format_stored_country(value))
     return (None, None)
 
 

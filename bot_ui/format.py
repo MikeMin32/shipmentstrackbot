@@ -8,10 +8,9 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from domain.countries import (
-    country_code_to_flag,
+    flag_for_location,
     format_country_code,
-    format_country_label,
-    should_show_flag,
+    format_stored_country,
 )
 from domain.status import (
     home_section_label,
@@ -287,7 +286,7 @@ def format_draft(
 
     country = (draft.get("country") or "").strip()
     name = (draft.get("name") or "").strip()
-    country_shown = format_country_label(country) if country else ""
+    country_shown = format_stored_country(country) if country else ""
     lines = [
         "<b>➕ NEW SHIPMENT</b>",
         "",
@@ -482,11 +481,7 @@ def format_edd_reminder_notice(shipment: dict[str, Any], *, hours: int) -> str:
         name = (shipment.get("account_name") or "").strip() or (shipment.get("clone_name") or "").strip()
     qty = format_unit_quantity_compact(shipment.get("unit_quantity"))
     team = (shipment.get("client_team_name") or "").strip()
-    flag = (
-        country_code_to_flag(shipment.get("country"))
-        if should_show_flag(shipment.get("country"))
-        else None
-    )
+    flag = flag_for_location(shipment.get("country"))
     prefix = f"{flag} " if flag else ""
 
     if name:

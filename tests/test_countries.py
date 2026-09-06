@@ -1,11 +1,15 @@
 from domain.countries import (
     CODE_INDEX,
+    LOCATION_COUNTRY_ALIASES,
     country_code_from_index,
     country_code_to_flag,
+    flag_for_location,
     format_country_code,
     format_country_label,
+    format_stored_country,
     is_iso_country_code,
     recent_country_items,
+    resolve_country_code,
     search_countries,
     should_show_flag,
 )
@@ -22,11 +26,58 @@ def test_country_code_to_flag_from_iso() -> None:
     assert country_code_to_flag("D") is None
 
 
-def test_legacy_location_codes_are_not_flagged() -> None:
-    assert should_show_flag("LA") is False
-    assert format_country_code("LA") == "LA"
-    assert format_country_code("ATL") == "ATL"
+def test_resolve_country_code_iso_and_aliases() -> None:
+    assert resolve_country_code("DE") == "DE"
+    assert resolve_country_code("ca") == "CA"
+    assert resolve_country_code("US") == "US"
+    assert resolve_country_code("IT") == "IT"
+    assert resolve_country_code("LA") == "US"
+    assert resolve_country_code("la") == "US"
+    assert resolve_country_code("ATL") == "US"
+    assert resolve_country_code("atl") == "US"
+    assert resolve_country_code("XYZ") is None
+    assert resolve_country_code("") is None
+    assert resolve_country_code(None) is None
+
+
+def test_format_country_code_uses_alias_flag_without_duplicate_label() -> None:
     assert format_country_code("DE") == "🇩🇪 DE"
+    assert format_country_code("CA") == "🇨🇦 CA"
+    assert format_country_code("US") == "🇺🇸 US"
+    assert format_country_code("IT") == "🇮🇹 IT"
+    assert format_country_code("LA") == "🇺🇸 LA"
+    assert format_country_code("ATL") == "🇺🇸 ATL"
+    assert format_country_code("XYZ") == "XYZ"
+    assert format_country_code("  ") == ""
+    assert "🇺🇸 US LA" not in format_country_code("LA")
+    assert "🇺🇸 US ATL" not in format_country_code("ATL")
+    assert should_show_flag("LA") is True
+    assert should_show_flag("ATL") is True
+    assert should_show_flag("XYZ") is False
+    assert should_show_flag("DE") is True
+    assert flag_for_location("LA") == "🇺🇸"
+    assert flag_for_location("ATL") == "🇺🇸"
+    assert flag_for_location("XYZ") is None
+    assert LOCATION_COUNTRY_ALIASES["LA"] == "US"
+    assert LOCATION_COUNTRY_ALIASES["ATL"] == "US"
+
+
+def test_unknown_location_stays_readable_without_placeholder_flag() -> None:
+    assert format_country_code("XYZ") == "XYZ"
+    assert format_stored_country("XYZ") == "XYZ"
+    assert "🏳️" not in format_country_code("XYZ")
+    assert "None" not in format_country_code("XYZ")
+    assert "??" not in format_country_code("XYZ")
+
+
+def test_country_picker_keeps_iso_names_for_aliased_codes() -> None:
+    assert format_country_label("IT") == "🇮🇹 Italy"
+    assert format_country_label("DE") == "🇩🇪 Germany"
+    assert format_country_label("LA") == "Laos"
+    assert format_country_label("ATL") == "🇺🇸 ATL"
+    assert format_stored_country("DE") == "🇩🇪 Germany"
+    assert format_stored_country("LA") == "🇺🇸 LA"
+    assert format_stored_country("ATL") == "🇺🇸 ATL"
 
 
 def test_country_search_matches_name_and_code() -> None:
