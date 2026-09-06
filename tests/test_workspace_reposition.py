@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramNotFound
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -35,9 +35,18 @@ def _bad_request(text: str) -> TelegramBadRequest:
 
 
 class FakeBot:
-    def __init__(self, *, next_id: int = 100, fail_delete: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        next_id: int = 100,
+        fail_delete: bool = False,
+        fail_send: bool = False,
+        edit_error: str | None = None,
+    ) -> None:
         self.next_id = next_id
         self.fail_delete = fail_delete
+        self.fail_send = fail_send
+        self.edit_error = edit_error
         self.sent: list[dict] = []
         self.edited: list[dict] = []
         self.deleted: list[tuple[int, int]] = []
@@ -48,6 +57,8 @@ class FakeBot:
         self.messages[message_id] = {"text": text, "reply_markup": EMPTY_MARKUP}
 
     async def send_message(self, chat_id, text, reply_markup=None):
+        if self.fail_send:
+            raise _bad_request("can't send messages")
         self.next_id += 1
         while self.next_id in self.messages:
             self.next_id += 1
@@ -62,6 +73,10 @@ class FakeBot:
         return SimpleNamespace(message_id=self.next_id, chat=SimpleNamespace(id=chat_id))
 
     async def edit_message_text(self, *, chat_id, message_id, text, reply_markup=None):
+        if self.edit_error == "not_found":
+            raise TelegramNotFound(DeleteMessage(chat_id=chat_id, message_id=message_id), "Not Found")
+        if self.edit_error:
+            raise _bad_request(self.edit_error)
         if message_id not in self.messages:
             raise _bad_request("message to edit not found")
         rec = {
@@ -734,3 +749,150 @@ async def test_needs_reposition_survives_repository_reload(tmp_path) -> None:
         assert workspace_needs_reposition(reloaded) is False
     finally:
         await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_cleared_chat_stale_session_menu_sends_new_home(tmp_path) -> None:
+    db, repo, accounts, teams, sessions = await _repos(tmp_path)
+    try:
+        await _seed_workspace(sessions, message_id=12345)
+        bot = FakeBot(next_id=20)
+        message = _command_message(bot, text="/menu", message_id=50)
+        await cmd_menu(message, _state(), repo, accounts, teams, sessions, make_config(tmp_path))
+        assert len(bot.sent) == 1
+        assert bot.sent[0]["message_id"] != 12345
+        assert (111, 50) in bot.deleted
+        assert bot.deleted[-1] == (111, 50)
+        session = await sessions.get(111)
+        assert session is not None
+        assert session["message_id"] == bot.sent[0]["message_id"]
+        assert session["current_view"] == "home"
+        assert workspace_needs_reposition(session) is False
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_cleared_chat_stale_session_start_sends_new_home(tmp_path) -> None:
+    db, repo, accounts, teams, sessions = await _repos(tmp_path)
+    try:
+        await _seed_workspace(sessions, message_id=12345)
+        bot = FakeBot(next_id=20, edit_error="message identifier is invalid")
+        message = _command_message(bot, text="/start", message_id=51)
+        await cmd_menu(message, _state(), repo, accounts, teams, sessions, make_config(tmp_path))
+        assert len(bot.sent) == 1
+        assert (111, 51) in bot.deleted
+        assert bot.deleted[-1] == (111, 51)
+        assert (await sessions.get(111))["message_id"] == bot.sent[0]["message_id"]
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_workspace_callback_recovers_with_one_new_message(tmp_path) -> None:
+    db, _repo, _accounts, _teams, sessions = await _repos(tmp_path)
+    try:
+        await _seed_workspace(sessions, message_id=10)
+        bot = FakeBot(next_id=20)
+        callback = _callback(bot, message_id=10, text="GONE")
+        await present_from_callback(callback, sessions, _view("details", "RECOVERED DETAILS"))
+        assert bot.sent
+        assert bot.sent[0]["text"] == "RECOVERED DETAILS"
+        session = await sessions.get(111)
+        assert session is not None
+        assert session["message_id"] == bot.sent[0]["message_id"]
+        assert session["current_view"] == "details"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_inaccessible_callback_message_recovers_workspace(tmp_path) -> None:
+    db, repo, accounts, teams, sessions = await _repos(tmp_path)
+    try:
+        await _seed_workspace(sessions, message_id=10)
+        bot = FakeBot(next_id=20)
+        callback = AsyncMock(spec=CallbackQuery)
+        callback.bot = bot
+        callback.from_user = SimpleNamespace(id=111)
+        callback.message = SimpleNamespace(message_id=10, chat=SimpleNamespace(id=111))
+        callback.answer = AsyncMock()
+        await cb_home(
+            callback,
+            _state(),
+            repo,
+            accounts,
+            teams,
+            sessions,
+            make_config(tmp_path),
+        )
+        assert bot.sent
+        session = await sessions.get(111)
+        assert session is not None
+        assert session["message_id"] == bot.sent[0]["message_id"]
+        assert session["current_view"] == "home"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_command_not_deleted_when_presentation_fails(tmp_path) -> None:
+    db, repo, accounts, teams, sessions = await _repos(tmp_path)
+    try:
+        await _seed_workspace(sessions, message_id=12345)
+        bot = FakeBot(next_id=20, fail_send=True)
+        message = _command_message(bot, text="/menu", message_id=50)
+        await cmd_menu(message, _state(), repo, accounts, teams, sessions, make_config(tmp_path))
+        assert bot.sent == []
+        assert (111, 50) not in bot.deleted
+        session = await sessions.get(111)
+        assert session is not None
+        assert session["message_id"] == 12345
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_buried_workspace_recovers_and_clears_flag(tmp_path) -> None:
+    db, _repo, _accounts, _teams, sessions = await _repos(tmp_path)
+    try:
+        await _seed_workspace(sessions, message_id=10)
+        await sessions.mark_needs_reposition(111)
+        bot = FakeBot(next_id=20, fail_delete=True)
+        bot.seed_message(21, "REMINDER")
+        mid = await present(
+            bot,
+            sessions,
+            user_id=111,
+            chat_id=111,
+            view=_view("home", "NEW HOME"),
+        )
+        assert bot.sent[0]["text"] == "NEW HOME"
+        assert mid == bot.sent[0]["message_id"]
+        assert bot.messages[21]["text"] == "REMINDER"
+        session = await sessions.get(111)
+        assert session is not None
+        assert session["message_id"] == mid
+        assert workspace_needs_reposition(session) is False
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_telegram_not_found_is_treated_as_stale_workspace(tmp_path) -> None:
+    db, _repo, _accounts, _teams, sessions = await _repos(tmp_path)
+    try:
+        await _seed_workspace(sessions, message_id=10)
+        bot = FakeBot(next_id=20, edit_error="not_found")
+        mid = await present(
+            bot,
+            sessions,
+            user_id=111,
+            chat_id=111,
+            view=_view("home", "HOME AFTER 404"),
+        )
+        assert mid == bot.sent[0]["message_id"]
+        assert bot.sent[0]["text"] == "HOME AFTER 404"
+        assert (await sessions.get(111))["message_id"] == mid
+    finally:
+        await db.close()

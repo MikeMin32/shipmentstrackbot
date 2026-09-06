@@ -354,7 +354,7 @@ async def show_current(
     sessions: BotSessionRepository,
     config: Config,
     from_notice: bool = False,
-) -> None:
+) -> bool:
     frame = await current_frame(state)
     view = await render_frame(
         frame, repo=repo, accounts=accounts, teams=teams, state=state, config=config
@@ -363,9 +363,9 @@ async def show_current(
         await present_from_callback(
             callback, sessions, view, from_notice=from_notice
         )
-        return
+        return True
     if message is None or message.from_user is None:
-        return
+        return False
     await present(
         message.bot,
         sessions,
@@ -373,6 +373,30 @@ async def show_current(
         chat_id=message.chat.id,
         view=view,
     )
+    return True
+
+
+async def _present_command(
+    message: Message,
+    sessions: BotSessionRepository,
+    view,
+) -> bool:
+    user = message.from_user
+    if user is None:
+        return False
+    try:
+        await present(
+            message.bot,
+            sessions,
+            user_id=user.id,
+            chat_id=message.chat.id,
+            view=view,
+        )
+    except Exception:
+        logger.exception("Workspace presentation failed; leaving command message")
+        return False
+    await try_delete_message(message)
+    return True
 
 
 async def show_home(
@@ -431,11 +455,13 @@ async def pop_to_host(state: FSMContext) -> dict[str, Any]:
 
 
 async def stale(callback: CallbackQuery, sessions: BotSessionRepository) -> bool:
-    if callback.message is None or not isinstance(callback.message, Message):
-        await answer_callback(callback, "Message unavailable.", show_alert=True)
-        return True
     if callback.from_user is None:
         return True
+    if callback.message is None or not isinstance(callback.message, Message):
+        # The original panel is gone (cleared chat / deleted message).
+        # Let the handler recover through present().
+        await answer_callback(callback)
+        return False
     session = await sessions.get(callback.from_user.id)
     if is_outdated_workspace(session, callback.message):
         await answer_callback(callback, OUTDATED_ALERT, show_alert=True)
@@ -496,14 +522,7 @@ async def cmd_menu(
     user = message.from_user
     if user is None:
         return
-    await present(
-        message.bot,
-        sessions,
-        user_id=user.id,
-        chat_id=message.chat.id,
-        view=view,
-    )
-    await try_delete_message(message)
+    await _present_command(message, sessions, view)
 
 
 @router.message(Command("add"))
@@ -519,16 +538,21 @@ async def cmd_add(
     await state.set_state(None)
     await state.update_data(draft=new_draft(), creating=False, picker_query=None)
     await goto(state, {"v": "home"}, {"v": "draft"})
-    await show_current(
-        message=message,
-        state=state,
-        repo=repo,
-        accounts=accounts,
-        teams=teams,
-        sessions=sessions,
-        config=config,
-    )
-    await try_delete_message(message)
+    try:
+        shown = await show_current(
+            message=message,
+            state=state,
+            repo=repo,
+            accounts=accounts,
+            teams=teams,
+            sessions=sessions,
+            config=config,
+        )
+    except Exception:
+        logger.exception("Workspace presentation failed; leaving command message")
+        return
+    if shown:
+        await try_delete_message(message)
 
 
 @router.message(Command("search"))
@@ -544,18 +568,9 @@ async def cmd_search(
     del repo, accounts, teams
     await state.set_state(WorkspaceStates.waiting_input)
     await state.update_data(input_kind="search")
-    user = message.from_user
-    if user is None:
-        return
-    await present(
-        message.bot,
-        sessions,
-        user_id=user.id,
-        chat_id=message.chat.id,
-        view=view_search_prompt(),
-    )
-    await sessions.set_view(user.id, "input")
-    await try_delete_message(message)
+    shown = await _present_command(message, sessions, view_search_prompt())
+    if shown and message.from_user is not None:
+        await sessions.set_view(message.from_user.id, "input")
 
 
 @router.message(Command("cancel"))
@@ -569,8 +584,11 @@ async def cmd_cancel(
     config: Config,
 ) -> None:
     current = await state.get_state()
-    if current is None:
-        await show_current(
+    if current is not None:
+        await state.set_state(None)
+        await state.update_data(input_kind=None, picker_query=None)
+    try:
+        shown = await show_current(
             message=message,
             state=state,
             repo=repo,
@@ -579,20 +597,11 @@ async def cmd_cancel(
             sessions=sessions,
             config=config,
         )
-        await try_delete_message(message)
+    except Exception:
+        logger.exception("Workspace presentation failed; leaving command message")
         return
-    await state.set_state(None)
-    await state.update_data(input_kind=None, picker_query=None)
-    await show_current(
-        message=message,
-        state=state,
-        repo=repo,
-        accounts=accounts,
-        teams=teams,
-        sessions=sessions,
-        config=config,
-    )
-    await try_delete_message(message)
+    if shown:
+        await try_delete_message(message)
 
 
 # --- Navigation callbacks --------------------------------------------------

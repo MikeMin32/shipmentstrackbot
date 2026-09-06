@@ -6,8 +6,17 @@ import logging
 from typing import Any
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import CallbackQuery, Message
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramConflictError,
+    TelegramForbiddenError,
+    TelegramNotFound,
+    TelegramRetryAfter,
+    TelegramServerError,
+    TelegramUnauthorizedError,
+)
+from aiogram.types import CallbackQuery, InaccessibleMessage, Message
 
 from bot_ui.views import View
 from database.entities import AccountRepository
@@ -18,14 +27,35 @@ logger = logging.getLogger(__name__)
 
 OUTDATED_ALERT = "This panel is outdated. Open the current menu."
 
+_STALE_MESSAGE_MARKERS = (
+    "message to edit not found",
+    "message to delete not found",
+    "message can't be edited",
+    "message can't be deleted",
+    "message identifier is invalid",
+    "message_id_invalid",
+    "message not found",
+)
+
+_SERIOUS_TELEGRAM_ERRORS = (
+    TelegramUnauthorizedError,
+    TelegramForbiddenError,
+    TelegramConflictError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
+
 
 def is_outdated_workspace(
     session: dict[str, Any] | None,
-    message: Message | None,
+    message: Message | InaccessibleMessage | None,
 ) -> bool:
     if session is None or message is None:
         return False
-    return int(session["message_id"]) != int(message.message_id)
+    message_id = getattr(message, "message_id", None)
+    if message_id is None:
+        return False
+    return int(session["message_id"]) != int(message_id)
 
 
 def workspace_needs_reposition(session: dict[str, Any] | None) -> bool:
@@ -33,6 +63,36 @@ def workspace_needs_reposition(session: dict[str, Any] | None) -> bool:
     if session is None:
         return False
     return bool(int(session.get("needs_reposition") or 0))
+
+
+def is_unmodified_message_error(exc: BaseException) -> bool:
+    return "message is not modified" in str(exc).lower()
+
+
+def is_stale_workspace_error(exc: BaseException) -> bool:
+    """True when Telegram no longer has an editable workspace message."""
+    if isinstance(exc, TelegramNotFound):
+        return True
+    if isinstance(exc, _SERIOUS_TELEGRAM_ERRORS):
+        return False
+    if not isinstance(exc, TelegramAPIError):
+        return False
+    if is_unmodified_message_error(exc):
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in _STALE_MESSAGE_MARKERS)
+
+
+def _callback_chat_id(callback: CallbackQuery, session: dict[str, Any] | None) -> int | None:
+    message = callback.message
+    if message is not None and getattr(message, "chat", None) is not None:
+        return int(message.chat.id)
+    if session is not None:
+        return int(session["chat_id"])
+    user = callback.from_user
+    if user is not None:
+        return int(user.id)
+    return None
 
 
 async def try_delete_message(message: Message | None) -> bool:
@@ -55,7 +115,7 @@ async def strip_keyboard(bot: Bot, chat_id: int, message_id: int) -> None:
             message_id=message_id,
             reply_markup=None,
         )
-    except TelegramBadRequest:
+    except TelegramAPIError:
         return
     except Exception:
         logger.debug("Could not strip workspace keyboard", exc_info=True)
@@ -66,7 +126,7 @@ async def retire_workspace(bot: Bot, chat_id: int, message_id: int) -> None:
     try:
         await bot.delete_message(chat_id=chat_id, message_id=message_id)
         return
-    except TelegramBadRequest:
+    except TelegramAPIError:
         pass
     except Exception:
         logger.debug("Could not delete workspace message", exc_info=True)
@@ -90,6 +150,25 @@ async def _record_workspace(
     )
 
 
+async def _send_new_workspace(
+    bot: Bot,
+    sessions: BotSessionRepository,
+    *,
+    user_id: int,
+    chat_id: int,
+    view: View,
+) -> int:
+    sent = await bot.send_message(chat_id, view.text, reply_markup=view.markup)
+    await _record_workspace(
+        sessions,
+        user_id=user_id,
+        chat_id=chat_id,
+        message_id=sent.message_id,
+        view_name=view.name,
+    )
+    return sent.message_id
+
+
 async def ensure_workspace_at_bottom(
     bot: Bot,
     sessions: BotSessionRepository,
@@ -106,15 +185,13 @@ async def ensure_workspace_at_bottom(
             int(session["chat_id"]),
             int(session["message_id"]),
         )
-    sent = await bot.send_message(chat_id, view.text, reply_markup=view.markup)
-    await _record_workspace(
+    return await _send_new_workspace(
+        bot,
         sessions,
         user_id=user_id,
         chat_id=chat_id,
-        message_id=sent.message_id,
-        view_name=view.name,
+        view=view,
     )
-    return sent.message_id
 
 
 async def present(
@@ -129,13 +206,12 @@ async def present(
 ) -> int:
     """Show a view in the single active workspace. Returns the active message_id.
 
-    Reminder/notice messages are never adopted or edited. There is at most one
-    interactive workspace: edit it in place, or retire it and send a replacement
-    below any later notifications.
+    A stored message ID is never assumed to still exist. If that Telegram
+    message is gone or uneditable, the requested view is sent as a new
+    workspace and the session is updated.
     """
     session = await sessions.get(user_id)
     if from_notice:
-        # Never treat a reminder/notice as the workspace edit target.
         prefer_message_id = None
 
     if workspace_needs_reposition(session):
@@ -149,24 +225,23 @@ async def present(
         )
 
     if session is None:
-        sent = await bot.send_message(chat_id, view.text, reply_markup=view.markup)
-        await _record_workspace(
+        return await _send_new_workspace(
+            bot,
             sessions,
             user_id=user_id,
             chat_id=chat_id,
-            message_id=sent.message_id,
-            view_name=view.name,
+            view=view,
         )
-        return sent.message_id
 
     target_id = prefer_message_id
+    edit_chat_id = chat_id
     if target_id is None:
         target_id = int(session["message_id"])
-        chat_id = int(session["chat_id"])
+        edit_chat_id = int(session["chat_id"])
 
     try:
         await bot.edit_message_text(
-            chat_id=chat_id,
+            chat_id=edit_chat_id,
             message_id=target_id,
             text=view.text,
             reply_markup=view.markup,
@@ -174,41 +249,69 @@ async def present(
         await _record_workspace(
             sessions,
             user_id=user_id,
-            chat_id=chat_id,
+            chat_id=edit_chat_id,
             message_id=target_id,
             view_name=view.name,
         )
         return target_id
-    except TelegramBadRequest as exc:
-        if "message is not modified" in str(exc).lower():
+    except TelegramAPIError as exc:
+        if is_unmodified_message_error(exc):
             try:
                 await bot.edit_message_reply_markup(
-                    chat_id=chat_id,
+                    chat_id=edit_chat_id,
                     message_id=target_id,
                     reply_markup=view.markup,
                 )
-            except TelegramBadRequest:
-                pass
-            await _record_workspace(
-                sessions,
-                user_id=user_id,
-                chat_id=chat_id,
-                message_id=target_id,
-                view_name=view.name,
+            except TelegramAPIError as markup_exc:
+                if is_stale_workspace_error(markup_exc):
+                    logger.info(
+                        "Workspace markup edit failed on stale message (%s); "
+                        "recovering with a new panel",
+                        markup_exc,
+                    )
+                elif not is_unmodified_message_error(markup_exc):
+                    raise
+                else:
+                    await _record_workspace(
+                        sessions,
+                        user_id=user_id,
+                        chat_id=edit_chat_id,
+                        message_id=target_id,
+                        view_name=view.name,
+                    )
+                    return target_id
+            else:
+                await _record_workspace(
+                    sessions,
+                    user_id=user_id,
+                    chat_id=edit_chat_id,
+                    message_id=target_id,
+                    view_name=view.name,
+                )
+                return target_id
+        elif is_stale_workspace_error(exc):
+            logger.info(
+                "Workspace message %s is stale (%s); sending a new panel",
+                target_id,
+                exc,
             )
-            return target_id
-        logger.info("Workspace edit failed (%s); recovering with a new panel", exc)
+        else:
+            raise
 
-    await retire_workspace(bot, int(session["chat_id"]), int(session["message_id"]))
-    sent = await bot.send_message(chat_id, view.text, reply_markup=view.markup)
-    await _record_workspace(
-        sessions,
-        user_id=user_id,
-        chat_id=chat_id,
-        message_id=sent.message_id,
-        view_name=view.name,
+    await retire_workspace(
+        bot, int(session["chat_id"]), int(session["message_id"])
     )
-    return sent.message_id
+    try:
+        return await _send_new_workspace(
+            bot,
+            sessions,
+            user_id=user_id,
+            chat_id=chat_id,
+            view=view,
+        )
+    except Exception:
+        logger.exception("Failed to send replacement workspace for user %s", user_id)
+        raise
 
 
 async def present_from_callback(
@@ -218,21 +321,29 @@ async def present_from_callback(
     *,
     from_notice: bool = False,
 ) -> None:
-    if callback.message is None or not isinstance(callback.message, Message):
-        return
-    bot = callback.bot
     user = callback.from_user
     if user is None:
         return
-    await present(
-        bot,
-        sessions,
-        user_id=user.id,
-        chat_id=callback.message.chat.id,
-        view=view,
-        prefer_message_id=None if from_notice else callback.message.message_id,
-        from_notice=from_notice,
-    )
+    session = await sessions.get(user.id)
+    chat_id = _callback_chat_id(callback, session)
+    if chat_id is None:
+        return
+    prefer_message_id = None
+    message = callback.message
+    if isinstance(message, Message) and not from_notice:
+        prefer_message_id = message.message_id
+    try:
+        await present(
+            callback.bot,
+            sessions,
+            user_id=user.id,
+            chat_id=chat_id,
+            view=view,
+            prefer_message_id=prefer_message_id,
+            from_notice=from_notice,
+        )
+    except Exception:
+        logger.exception("Workspace presentation failed from callback")
 
 
 async def refresh_other_homes(
@@ -260,7 +371,7 @@ async def refresh_other_homes(
                 text=view.text,
                 reply_markup=view.markup,
             )
-        except TelegramBadRequest:
+        except TelegramAPIError:
             continue
         except Exception:
             logger.debug(
