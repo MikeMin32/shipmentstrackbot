@@ -245,9 +245,9 @@ async def test_edd_worker_claims_before_send_and_retries_on_failure(tmp_path: Pa
         await worker._deliver_edd(due_again[0])
         assert bot.send_message.await_count == 1
         text = bot.send_message.await_args.kwargs["text"]
-        assert "🇩🇪 <b>Oner Active</b> (<i>5u</i>)" in text
+        assert "🇩🇪 <b>Oner Active</b> <i>5u</i>" in text
         assert "<b>48 hrs</b>" in text
-        assert text.endswith("check tracking 🔎")
+        assert text.endswith("check tracking")
         assert await repo.due_edd_reminders(now=at_48h, tz_name="UTC", reminder_hour=9) == []
 
         reloaded = await repo.get_by_id(shipment["id"])

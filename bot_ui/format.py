@@ -492,17 +492,17 @@ def format_edd_reminder_notice(shipment: dict[str, Any], *, hours: int) -> str:
     if name:
         head = f"{prefix}<b>{esc(name)}</b>"
         if qty:
-            head = f"{head} (<i>{esc(qty)}</i>)"
+            head = f"{head} <i>{esc(qty)}</i>"
         lead = f"{head} shipment expected delivery"
     elif qty:
-        lead = f"{prefix}(<i>{esc(qty)}</i>) shipment expected delivery"
+        lead = f"{prefix}<i>{esc(qty)}</i> shipment expected delivery"
     else:
         lead = f"{prefix}Shipment expected delivery"
 
     hours_text = f"<b>{int(hours)} hrs</b>"
     if team:
-        return f"{lead} to <b>{esc(team)}</b> in {hours_text}; check tracking 🔎"
-    return f"{lead} in {hours_text}; check tracking 🔎"
+        return f"{lead} to <b>{esc(team)}</b> in {hours_text}; check tracking"
+    return f"{lead} in {hours_text}; check tracking"
 
 
 def format_note_prompt() -> str:

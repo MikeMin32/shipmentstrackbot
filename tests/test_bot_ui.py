@@ -249,8 +249,8 @@ def test_unit_quantity_display_and_notice() -> None:
         },
         hours=48,
     ) == (
-        "🇩🇪 <b>Oner Active</b> (<i>5u</i>) shipment expected delivery to "
-        "<b>Stealth</b> in <b>48 hrs</b>; check tracking 🔎"
+        "🇩🇪 <b>Oner Active</b> <i>5u</i> shipment expected delivery to "
+        "<b>Stealth</b> in <b>48 hrs</b>; check tracking"
     )
     assert format_edd_reminder_notice(
         {
@@ -261,32 +261,32 @@ def test_unit_quantity_display_and_notice() -> None:
         },
         hours=24,
     ) == (
-        "🇩🇪 <b>Oner Active</b> (<i>5u</i>) shipment expected delivery to "
-        "<b>Stealth</b> in <b>24 hrs</b>; check tracking 🔎"
+        "🇩🇪 <b>Oner Active</b> <i>5u</i> shipment expected delivery to "
+        "<b>Stealth</b> in <b>24 hrs</b>; check tracking"
     )
     assert format_edd_reminder_notice(
         {"name": "Oner Active", "country": "DE", "client_team_name": "Stealth"},
         hours=48,
     ) == (
         "🇩🇪 <b>Oner Active</b> shipment expected delivery to "
-        "<b>Stealth</b> in <b>48 hrs</b>; check tracking 🔎"
+        "<b>Stealth</b> in <b>48 hrs</b>; check tracking"
     )
     assert format_edd_reminder_notice(
         {"name": "Oner Active", "country": "DE", "unit_quantity": 5},
         hours=48,
     ) == (
-        "🇩🇪 <b>Oner Active</b> (<i>5u</i>) shipment expected delivery "
-        "in <b>48 hrs</b>; check tracking 🔎"
+        "🇩🇪 <b>Oner Active</b> <i>5u</i> shipment expected delivery "
+        "in <b>48 hrs</b>; check tracking"
     )
     assert format_edd_reminder_notice({}, hours=24) == (
-        "Shipment expected delivery in <b>24 hrs</b>; check tracking 🔎"
+        "Shipment expected delivery in <b>24 hrs</b>; check tracking"
     )
     assert format_edd_reminder_notice(
         {"name": "Oner Active", "country": "ATL", "unit_quantity": 5, "client_team_name": "Stealth"},
         hours=48,
     ) == (
-        "<b>Oner Active</b> (<i>5u</i>) shipment expected delivery to "
-        "<b>Stealth</b> in <b>48 hrs</b>; check tracking 🔎"
+        "<b>Oner Active</b> <i>5u</i> shipment expected delivery to "
+        "<b>Stealth</b> in <b>48 hrs</b>; check tracking"
     )
     escaped = format_edd_reminder_notice(
         {"name": "A & B <x>", "country": "DE", "client_team_name": "Stealth > HQ"},
@@ -295,7 +295,7 @@ def test_unit_quantity_display_and_notice() -> None:
     assert escaped.startswith("🇩🇪 <b>A &amp; B &lt;x&gt;</b>")
     assert "<b>Stealth &gt; HQ</b>" in escaped
     assert "<b>24 hrs</b>" in escaped
-    assert escaped.endswith("check tracking 🔎")
+    assert escaped.endswith("check tracking")
 
 
 def test_outdated_workspace_detects_old_message() -> None:
