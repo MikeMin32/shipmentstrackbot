@@ -557,7 +557,7 @@ async def test_home_button_on_old_workspace_repositions_after_reminder(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_menu_edits_existing_workspace_at_bottom(tmp_path) -> None:
+async def test_menu_reanchors_existing_workspace_even_if_editable(tmp_path) -> None:
     db, repo, accounts, teams, sessions = await _repos(tmp_path)
     try:
         await _seed_workspace(sessions, message_id=10, current_view="details")
@@ -565,14 +565,16 @@ async def test_menu_edits_existing_workspace_at_bottom(tmp_path) -> None:
         bot.seed_message(10, "SHIPMENT DETAILS")
         message = _command_message(bot, text="/menu", message_id=50)
         await cmd_menu(message, _state(), repo, accounts, teams, sessions, make_config(tmp_path))
-        assert bot.sent == []
-        assert len(bot.edited) == 1
-        assert bot.edited[0]["message_id"] == 10
-        assert bot.deleted == [(111, 50)]
+        assert bot.edited == []
+        assert len(bot.sent) == 1
+        assert (111, 10) in bot.deleted
+        assert bot.deleted[-1] == (111, 50)
         session = await sessions.get(111)
         assert session is not None
-        assert session["message_id"] == 10
+        assert session["message_id"] == bot.sent[0]["message_id"]
+        assert session["message_id"] != 10
         assert session["current_view"] == "home"
+        assert workspace_needs_reposition(session) is False
     finally:
         await db.close()
 
@@ -588,6 +590,7 @@ async def test_menu_after_reminder_repositions_home(tmp_path) -> None:
         bot.seed_message(21, "REMINDER")
         message = _command_message(bot, text="/menu", message_id=50)
         await cmd_menu(message, _state(), repo, accounts, teams, sessions, make_config(tmp_path))
+        assert bot.edited == []
         assert bot.deleted == [(111, 10), (111, 50)]
         assert len(bot.sent) == 1
         assert bot.messages[21]["text"] == "REMINDER"
@@ -595,6 +598,30 @@ async def test_menu_after_reminder_repositions_home(tmp_path) -> None:
         assert session is not None
         assert session["message_id"] == bot.sent[0]["message_id"]
         assert session["current_view"] == "home"
+        assert workspace_needs_reposition(session) is False
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_menu_after_reminder_without_reposition_flag(tmp_path) -> None:
+    db, repo, accounts, teams, sessions = await _repos(tmp_path)
+    try:
+        await _seed_workspace(sessions, message_id=10)
+        bot = FakeBot(next_id=20)
+        bot.seed_message(10, "OLD WORKSPACE")
+        bot.seed_message(21, "REMINDER")
+        message = _command_message(bot, text="/menu", message_id=50)
+        await cmd_menu(message, _state(), repo, accounts, teams, sessions, make_config(tmp_path))
+        assert bot.edited == []
+        assert bot.messages[21]["text"] == "REMINDER"
+        assert (111, 21) not in bot.deleted
+        assert (111, 10) in bot.deleted
+        assert len(bot.sent) == 1
+        assert bot.sent[0]["message_id"] > 21
+        session = await sessions.get(111)
+        assert session is not None
+        assert session["message_id"] == bot.sent[0]["message_id"]
         assert workspace_needs_reposition(session) is False
     finally:
         await db.close()
@@ -621,7 +648,7 @@ async def test_menu_with_no_session_sends_home(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_start_reuses_existing_workspace(tmp_path) -> None:
+async def test_start_reanchors_existing_workspace(tmp_path) -> None:
     db, repo, accounts, teams, sessions = await _repos(tmp_path)
     try:
         await _seed_workspace(sessions, message_id=10)
@@ -629,9 +656,10 @@ async def test_start_reuses_existing_workspace(tmp_path) -> None:
         bot.seed_message(10, "HOME")
         message = _command_message(bot, text="/start", message_id=51)
         await cmd_menu(message, _state(), repo, accounts, teams, sessions, make_config(tmp_path))
-        assert bot.sent == []
-        assert bot.edited[0]["message_id"] == 10
-        assert (await sessions.get(111))["message_id"] == 10
+        assert bot.edited == []
+        assert len(bot.sent) == 1
+        assert (111, 10) in bot.deleted
+        assert (await sessions.get(111))["message_id"] == bot.sent[0]["message_id"]
     finally:
         await db.close()
 
@@ -645,11 +673,12 @@ async def test_menu_command_delete_failure_still_presents(tmp_path) -> None:
         bot.seed_message(10, "SHIPMENT")
         message = _command_message(bot, text="/menu", message_id=50, fail_delete=True)
         await cmd_menu(message, _state(), repo, accounts, teams, sessions, make_config(tmp_path))
-        assert bot.edited[0]["message_id"] == 10
+        assert bot.sent
+        assert bot.edited == []
         assert (111, 50) not in bot.deleted
         session = await sessions.get(111)
         assert session is not None
-        assert session["message_id"] == 10
+        assert session["message_id"] == bot.sent[0]["message_id"]
         assert session["current_view"] == "home"
     finally:
         await db.close()
@@ -757,8 +786,11 @@ async def test_cleared_chat_stale_session_menu_sends_new_home(tmp_path) -> None:
     try:
         await _seed_workspace(sessions, message_id=12345)
         bot = FakeBot(next_id=20)
+        # Telegram may still accept edits to the stored ID after a cleared chat.
+        bot.seed_message(12345, "INVISIBLE OLD WORKSPACE")
         message = _command_message(bot, text="/menu", message_id=50)
         await cmd_menu(message, _state(), repo, accounts, teams, sessions, make_config(tmp_path))
+        assert bot.edited == []
         assert len(bot.sent) == 1
         assert bot.sent[0]["message_id"] != 12345
         assert (111, 50) in bot.deleted
@@ -844,10 +876,12 @@ async def test_command_not_deleted_when_presentation_fails(tmp_path) -> None:
         message = _command_message(bot, text="/menu", message_id=50)
         await cmd_menu(message, _state(), repo, accounts, teams, sessions, make_config(tmp_path))
         assert bot.sent == []
+        assert bot.edited == []
         assert (111, 50) not in bot.deleted
         session = await sessions.get(111)
         assert session is not None
         assert session["message_id"] == 12345
+        assert session["current_view"] == "home"
     finally:
         await db.close()
 

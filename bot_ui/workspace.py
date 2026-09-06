@@ -194,6 +194,40 @@ async def ensure_workspace_at_bottom(
     )
 
 
+async def reanchor_workspace(
+    bot: Bot,
+    sessions: BotSessionRepository,
+    *,
+    user_id: int,
+    chat_id: int,
+    view: View,
+) -> int:
+    """Always send a fresh workspace for explicit slash commands.
+
+    Telegram may still accept edits to a stored message ID after the user
+    clears chat history, so commands never reuse that ID. The session is
+    updated only after the new message is sent.
+    """
+    session = await sessions.get(user_id)
+    if session is not None:
+        await retire_workspace(
+            bot,
+            int(session["chat_id"]),
+            int(session["message_id"]),
+        )
+    try:
+        return await _send_new_workspace(
+            bot,
+            sessions,
+            user_id=user_id,
+            chat_id=chat_id,
+            view=view,
+        )
+    except Exception:
+        logger.exception("Failed to re-anchor workspace for user %s", user_id)
+        raise
+
+
 async def present(
     bot: Bot,
     sessions: BotSessionRepository,
@@ -203,6 +237,7 @@ async def present(
     view: View,
     prefer_message_id: int | None = None,
     from_notice: bool = False,
+    reanchor: bool = False,
 ) -> int:
     """Show a view in the single active workspace. Returns the active message_id.
 
@@ -210,6 +245,15 @@ async def present(
     message is gone or uneditable, the requested view is sent as a new
     workspace and the session is updated.
     """
+    if reanchor:
+        return await reanchor_workspace(
+            bot,
+            sessions,
+            user_id=user_id,
+            chat_id=chat_id,
+            view=view,
+        )
+
     session = await sessions.get(user_id)
     if from_notice:
         prefer_message_id = None

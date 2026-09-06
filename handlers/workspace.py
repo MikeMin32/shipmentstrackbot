@@ -354,6 +354,7 @@ async def show_current(
     sessions: BotSessionRepository,
     config: Config,
     from_notice: bool = False,
+    reanchor: bool = False,
 ) -> bool:
     frame = await current_frame(state)
     view = await render_frame(
@@ -372,6 +373,7 @@ async def show_current(
         user_id=message.from_user.id,
         chat_id=message.chat.id,
         view=view,
+        reanchor=reanchor,
     )
     return True
 
@@ -391,6 +393,7 @@ async def _present_command(
             user_id=user.id,
             chat_id=message.chat.id,
             view=view,
+            reanchor=True,
         )
     except Exception:
         logger.exception("Workspace presentation failed; leaving command message")
@@ -547,6 +550,7 @@ async def cmd_add(
             teams=teams,
             sessions=sessions,
             config=config,
+            reanchor=True,
         )
     except Exception:
         logger.exception("Workspace presentation failed; leaving command message")
@@ -596,6 +600,7 @@ async def cmd_cancel(
             teams=teams,
             sessions=sessions,
             config=config,
+            reanchor=True,
         )
     except Exception:
         logger.exception("Workspace presentation failed; leaving command message")
