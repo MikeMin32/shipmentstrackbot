@@ -11,7 +11,7 @@ DEFAULT_DRAFT: dict[str, Any] = {
     "country": None,
     "account_id": None,
     "client_team_id": None,
-    "box_weight": None,
+    "unit_quantity": None,
     "status": DEFAULT_STATUS,
     "label_creation_date": None,
     "scanned_in_date": None,

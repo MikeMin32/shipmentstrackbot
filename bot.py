@@ -86,7 +86,13 @@ async def main() -> None:
 
     dp.include_router(get_root_router(config))
 
-    worker = ReminderWorker(bot, repo)
+    worker = ReminderWorker(
+        bot,
+        repo,
+        recipient_ids=config.allowed_user_ids,
+        tz_name=config.app_timezone,
+        reminder_hour=config.edd_reminder_hour,
+    )
     worker.start()
 
     await _configure_telegram_ui(bot)

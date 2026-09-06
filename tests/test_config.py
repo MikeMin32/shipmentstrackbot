@@ -26,6 +26,7 @@ def test_allowed_user_ids_strips_spaces(monkeypatch: pytest.MonkeyPatch) -> None
     config = load_config()
     assert config.allowed_user_ids == frozenset({111, 222})
     assert config.app_timezone == "UTC"
+    assert config.edd_reminder_hour == 9
 
 
 def test_invalid_timezone(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -33,6 +34,15 @@ def test_invalid_timezone(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALLOWED_USER_IDS", "111")
     monkeypatch.setenv("APP_TIMEZONE", "Not/AZone")
     with pytest.raises(RuntimeError, match="Invalid APP_TIMEZONE"):
+        load_config()
+
+
+def test_invalid_edd_reminder_hour(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BOT_TOKEN", "123:ABC")
+    monkeypatch.setenv("ALLOWED_USER_IDS", "111")
+    monkeypatch.setenv("APP_TIMEZONE", "UTC")
+    monkeypatch.setenv("EDD_REMINDER_HOUR", "25")
+    with pytest.raises(RuntimeError, match="EDD_REMINDER_HOUR"):
         load_config()
 
 

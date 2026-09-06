@@ -6,7 +6,7 @@ import pytest
 
 from database.db import Database
 from database.entities import AccountRepository, ClientTeamRepository
-from database.repository import ShipmentRepository, validate_box_weight
+from database.repository import ShipmentRepository, validate_unit_quantity
 
 
 async def _repos(tmp_path):
@@ -27,7 +27,7 @@ async def test_create_update_complete_archive_restore(tmp_path) -> None:
             clone_name="Oner",
             name="Oner",
             client_team_id=team["id"],
-            box_weight=8.4,
+            unit_quantity=8.4,
             status="preparing",
             label_creation_date="2026-09-01",
             scanned_in_date="2026-09-02",
@@ -37,7 +37,7 @@ async def test_create_update_complete_archive_restore(tmp_path) -> None:
         )
         assert shipment["account_name"] == "Account A"
         assert shipment["client_team_name"] == "Team Alpha"
-        assert shipment["box_weight"] == 8.4
+        assert shipment["unit_quantity"] == 8.4
         assert shipment["status"] == "preparing"
         assert shipment["archived"] == 0
         assert shipment["delivered_date"] is None
@@ -120,7 +120,7 @@ async def test_active_archive_restore_keeps_status(tmp_path) -> None:
 
 def test_invalid_weight_rejected() -> None:
     with pytest.raises(ValueError):
-        validate_box_weight(-2)
+        validate_unit_quantity(-2)
 
 
 @pytest.mark.asyncio

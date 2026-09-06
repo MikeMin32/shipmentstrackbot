@@ -17,7 +17,7 @@ from bot_ui.callbacks import DateCB, NavCB, OpenCB, PickCB, RemCB, ShipCB
 from bot_ui.draft import draft_missing, new_draft
 from bot_ui.keyboards import iso_from_shipment_field
 from bot_ui.nav import current_frame, get_nav, goto, pop, push, replace_top, reset_home, set_nav
-from bot_ui.parse import parse_name, parse_weight_text
+from bot_ui.parse import parse_name, parse_unit_quantity_text
 from bot_ui.views import (
     View,
     current_picker_value,
@@ -46,7 +46,7 @@ from bot_ui.views import (
     view_reminder_time,
     view_search_prompt,
     view_search_results,
-    view_weight_prompt,
+    view_unit_quantity_prompt,
 )
 from bot_ui.workspace import (
     OUTDATED_ALERT,
@@ -821,7 +821,7 @@ async def cb_create(
             expected_delivery_date=draft.get("expected_delivery_date"),
             account_id=int(draft["account_id"]),
             client_team_id=draft.get("client_team_id"),
-            box_weight=draft.get("box_weight"),
+            unit_quantity=draft.get("unit_quantity"),
             label_creation_date=draft.get("label_creation_date"),
             scanned_in_date=draft.get("scanned_in_date"),
             require_account=True,
@@ -1031,13 +1031,13 @@ async def cb_draft_text_fields(
     if await stale(callback, sessions):
         return
     await answer_callback(callback)
-    kind = {"wt": "weight", "nt": "note", "nm": "name"}[callback_data.x]
+    kind = {"wt": "unit_quantity", "nt": "note", "nm": "name"}[callback_data.x]
     await state.set_state(WorkspaceStates.waiting_input)
     await state.update_data(input_kind=kind, input_target="d", input_shipment_id=0)
     data = await state.get_data()
     draft = data.get("draft") or {}
-    if kind == "weight":
-        view = view_weight_prompt(draft.get("box_weight"), target="d", shipment_id=0)
+    if kind == "unit_quantity":
+        view = view_unit_quantity_prompt(draft.get("unit_quantity"), target="d", shipment_id=0)
     elif kind == "name":
         view = view_name_prompt(draft.get("name"))
     else:
@@ -1046,7 +1046,7 @@ async def cb_draft_text_fields(
 
 
 @router.callback_query(NavCB.filter(F.x == "w0"))
-async def cb_draft_clear_weight(
+async def cb_draft_clear_unit_quantity(
     callback: CallbackQuery,
     state: FSMContext,
     repo: ShipmentRepository,
@@ -1059,10 +1059,10 @@ async def cb_draft_clear_weight(
         return
     data = await state.get_data()
     draft = dict(data.get("draft") or new_draft())
-    draft["box_weight"] = None
+    draft["unit_quantity"] = None
     await state.update_data(draft=draft)
     await state.set_state(None)
-    await answer_callback(callback, "Weight cleared")
+    await answer_callback(callback, "Unit quantity cleared")
     await show_current(
         callback=callback,
         state=state,
@@ -1179,14 +1179,14 @@ async def cb_shipment_text_fields(
         await answer_callback(callback, "Shipment not available.", show_alert=True)
         return
     await answer_callback(callback)
-    kind = {"wt": "weight", "nt": "note", "nm": "name"}[callback_data.x]
+    kind = {"wt": "unit_quantity", "nt": "note", "nm": "name"}[callback_data.x]
     await state.set_state(WorkspaceStates.waiting_input)
     await state.update_data(
         input_kind=kind, input_target="s", input_shipment_id=callback_data.i
     )
-    if kind == "weight":
-        view = view_weight_prompt(
-            shipment.get("box_weight"), target="s", shipment_id=callback_data.i
+    if kind == "unit_quantity":
+        view = view_unit_quantity_prompt(
+            shipment.get("unit_quantity"), target="s", shipment_id=callback_data.i
         )
     elif kind == "name":
         view = view_name_prompt(shipment.get("name"))
@@ -1196,7 +1196,7 @@ async def cb_shipment_text_fields(
 
 
 @router.callback_query(ShipCB.filter(F.x == "w0"))
-async def cb_clear_weight(
+async def cb_clear_unit_quantity(
     callback: CallbackQuery,
     callback_data: ShipCB,
     state: FSMContext,
@@ -1209,7 +1209,7 @@ async def cb_clear_weight(
     if await stale(callback, sessions):
         return
     try:
-        updated = await repo.update_fields(callback_data.i, box_weight=None)
+        updated = await repo.update_fields(callback_data.i, unit_quantity=None)
     except ValueError as exc:
         await answer_callback(callback, str(exc)[:180], show_alert=True)
         return
@@ -1217,7 +1217,7 @@ async def cb_clear_weight(
         await answer_callback(callback, "Shipment not available.", show_alert=True)
         return
     await state.set_state(None)
-    await answer_callback(callback, "Weight cleared")
+    await answer_callback(callback, "Unit quantity cleared")
     await pop_to_host(state)
     await show_current(
         callback=callback,
@@ -2193,14 +2193,14 @@ async def _handle_input_kind(
             raise ValueError("Enter a search query.")
         await state.update_data(picker_query=query or None)
         return
-    if kind == "weight":
-        weight = parse_weight_text(raw)
+    if kind == "unit_quantity":
+        quantity = parse_unit_quantity_text(raw)
         if target == "d":
             draft = dict(data.get("draft") or new_draft())
-            draft["box_weight"] = weight
+            draft["unit_quantity"] = quantity
             await state.update_data(draft=draft)
             return
-        updated = await repo.update_fields(shipment_id, box_weight=weight)
+        updated = await repo.update_fields(shipment_id, unit_quantity=quantity)
         if updated is None:
             raise ValueError("Shipment not available")
         await pop_to_host(state)
@@ -2315,7 +2315,7 @@ async def process_input(
         config=config,
     )
     if (
-        kind in {"weight", "note", "name", "account", "team"}
+        kind in {"unit_quantity", "note", "name", "account", "team"}
         and data.get("input_target") == "s"
     ):
         user = message.from_user

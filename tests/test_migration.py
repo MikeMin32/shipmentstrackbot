@@ -300,3 +300,84 @@ async def test_legacy_clone_becomes_account_not_name(tmp_path: Path) -> None:
         assert int(row["cnt"]) == 3
     finally:
         await db.close()
+
+
+def _write_box_weight_db(path: Path) -> None:
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE shipments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            country TEXT,
+            clone_name TEXT,
+            name TEXT,
+            display_name TEXT,
+            status TEXT NOT NULL,
+            note TEXT,
+            expected_date TEXT,
+            expected_delivery_date TEXT,
+            account_id INTEGER,
+            client_team_id INTEGER,
+            box_weight REAL,
+            label_creation_date TEXT,
+            scanned_in_date TEXT,
+            delivered_date TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            created_by INTEGER,
+            archived INTEGER NOT NULL DEFAULT 0
+        );
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO shipments (
+            country, clone_name, name, display_name, status,
+            box_weight, created_at, updated_at, archived
+        ) VALUES
+            ('DE', 'Oner', 'Oner Active', 'DE: Oner', 'enroute', 5, 't', 't', 0),
+            ('CA', 'Durston', 'Durston', 'CA: Durston', 'preparing', NULL, 't', 't', 0)
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.asyncio
+async def test_box_weight_migrates_to_unit_quantity(tmp_path: Path) -> None:
+    db_path = tmp_path / "box-weight.db"
+    _write_box_weight_db(db_path)
+
+    db = Database(db_path)
+    await db.connect()
+    try:
+        cols = await db._table_columns("shipments")
+        assert "unit_quantity" in cols
+        assert "box_weight" not in cols
+        repo = ShipmentRepository(db)
+        first = await repo.get_by_id(1)
+        second = await repo.get_by_id(2)
+        assert first is not None
+        assert first["unit_quantity"] == 5
+        assert "box_weight" not in first
+        assert second is not None
+        assert second["unit_quantity"] is None
+    finally:
+        await db.close()
+
+    again = Database(db_path)
+    await again.connect()
+    try:
+        cols = await again._table_columns("shipments")
+        assert "unit_quantity" in cols
+        assert "box_weight" not in cols
+        repo = ShipmentRepository(again)
+        first = await repo.get_by_id(1)
+        assert first is not None
+        assert first["unit_quantity"] == 5
+        updated = await repo.update_fields(1, unit_quantity=8.4)
+        assert updated is not None
+        assert updated["unit_quantity"] == 8.4
+        assert "box_weight" not in updated
+    finally:
+        await again.close()

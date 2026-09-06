@@ -30,7 +30,8 @@ cp .env.example .env
 | `BOT_TOKEN` | Bot token from [@BotFather](https://t.me/BotFather) |
 | `ALLOWED_USER_IDS` | Comma-separated Telegram user IDs |
 | `DATABASE_PATH` | SQLite file (default `./data/shipments.db`) |
-| `APP_TIMEZONE` | Timezone used for Home “today/tomorrow” and delivered dates (default `UTC`) |
+| `APP_TIMEZONE` | Timezone used for Home “today/tomorrow”, delivered dates, and Expected Delivery reminders (default `UTC`) |
+| `EDD_REMINDER_HOUR` | Local hour `0-23` in `APP_TIMEZONE` for automatic 48h/24h Expected Delivery reminders (default `9`) |
 
 Secrets stay in `.env`. Do not hardcode tokens in source.
 
@@ -56,8 +57,8 @@ Home is one editable Telegram message. Active shipments are grouped by operation
 
 | Status | Section |
 |---|---|
-| `enroute` | ✈️ EN ROUTE |
 | `out_for_delivery` | 🚚 OUT FOR DELIVERY |
+| `enroute` | ✈️ EN ROUTE |
 | `preparing` | 📦 PREPARING |
 | `make_label` | 🏷️ MAKE LABEL |
 | `standby` | ⏸️ STANDBY |
@@ -98,7 +99,8 @@ On connect (bot or `python -m database`) the app:
 
 * takes a process-level file lock (`DATABASE_PATH.migrate.lock`) then a SQLite `BEGIN EXCLUSIVE`
 * creates `accounts`, `client_teams`, and `bot_ui_sessions` if missing
-* adds `account_id`, `client_team_id`, `box_weight`, `label_creation_date`, `scanned_in_date`, `delivered_date`
+* adds `account_id`, `client_team_id`, `unit_quantity`, `edd_48h_sent_for`, `edd_24h_sent_for`, `label_creation_date`, `scanned_in_date`, `delivered_date`
+* copies leftover `box_weight` values into `unit_quantity` and drops `box_weight` when SQLite allows it
 * copies legacy `expected_date` into `expected_delivery_date` when needed
 * converts parseable EDD datetimes such as `2026-08-13T18:00:00Z` to `2026-08-13`
 * moves unparseable free-text EDD (`tomorrow`, `Wednesday`, …) to `expected_date` and sets `expected_delivery_date` to NULL
@@ -182,7 +184,16 @@ Internal values are unchanged except for the `delivered` status:
 
 Archive is independent of status (`archived = 1`). Completing a shipment sets `delivered` and `delivered_date` (today in `APP_TIMEZONE`) and does not archive it.
 
-Operational shipment dates are `YYYY-MM-DD`. Reminders remain datetimes.
+Operational shipment dates are `YYYY-MM-DD`. Manual reminders remain datetimes.
+
+Automatic Expected Delivery reminders are sent at `EDD_REMINDER_HOUR` in `APP_TIMEZONE`:
+
+* 48 hours / 2 days before Expected Delivery
+* 24 hours / 1 day before Expected Delivery
+
+They are not sent for archived shipments, delivered shipments, or shipments without Expected Delivery. Each of the two reminders is recorded on the shipment so a restart does not send it again. Changing Expected Delivery clears those records so the new date can be reminded.
+
+The shipment quantity field is stored as `unit_quantity`. Older `box_weight` values are copied into that column on upgrade.
 
 ## Project layout
 

@@ -39,10 +39,10 @@ OPERATIONAL_STATUSES: tuple[str, ...] = (
     "standby",
 )
 
-# Home operational list: En Route first, then outbound work, then warehouse work.
+# Home operational list: outbound first, then in transit, then warehouse work.
 HOME_STATUS_ORDER: tuple[str, ...] = (
-    "enroute",
     "out_for_delivery",
+    "enroute",
     "preparing",
     "make_label",
     "standby",

@@ -8,9 +8,9 @@ import logging
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 
-from database.repository import ShipmentRepository
-from bot_ui.format import format_reminder_notice
+from bot_ui.format import format_edd_reminder_notice, format_reminder_notice
 from bot_ui.keyboards import open_shipment_keyboard
+from database.repository import ShipmentRepository
 
 logger = logging.getLogger(__name__)
 
@@ -22,9 +22,16 @@ class ReminderWorker:
         self,
         bot: Bot,
         repo: ShipmentRepository,
+        *,
+        recipient_ids: frozenset[int] | None = None,
+        tz_name: str = "UTC",
+        reminder_hour: int = 9,
     ) -> None:
         self.bot = bot
         self.repo = repo
+        self.recipient_ids = recipient_ids or frozenset()
+        self.tz_name = tz_name
+        self.reminder_hour = reminder_hour
         self._task: asyncio.Task[None] | None = None
         self._stopped = asyncio.Event()
 
@@ -64,10 +71,22 @@ class ReminderWorker:
             due = await self.repo.due_reminders()
         except Exception:
             logger.exception("Failed to query due reminders")
-            return
+            due = []
 
         for row in due:
             await self._deliver(row)
+
+        try:
+            edd_due = await self.repo.due_edd_reminders(
+                tz_name=self.tz_name,
+                reminder_hour=self.reminder_hour,
+            )
+        except Exception:
+            logger.exception("Failed to query due Expected Delivery reminders")
+            return
+
+        for row in edd_due:
+            await self._deliver_edd(row)
 
     async def _deliver(self, row: dict) -> None:
         reminder_id = row["id"]
@@ -133,3 +152,62 @@ class ReminderWorker:
                 (reminder_id,),
             )
             await self.repo.db.connection.commit()
+
+    async def _deliver_edd(self, row: dict) -> None:
+        shipment_id = int(row["id"])
+        hours = int(row["edd_hours"])
+        edd = row["edd"]
+        recipients = set(self.recipient_ids)
+        created_by = row.get("created_by")
+        if created_by:
+            recipients.add(int(created_by))
+        if not recipients:
+            logger.warning(
+                "EDD reminder shipment_id=%s has no recipients; skipping",
+                shipment_id,
+            )
+            return
+
+        claimed = await self.repo.mark_edd_reminder_sent(shipment_id, hours, edd)
+        if not claimed:
+            return
+
+        text = format_edd_reminder_notice(row, hours=hours)
+        delivered = 0
+        for user_id in sorted(recipients):
+            try:
+                await self.bot.send_message(
+                    chat_id=int(user_id),
+                    text=text,
+                    reply_markup=open_shipment_keyboard(shipment_id),
+                )
+                delivered += 1
+            except TelegramAPIError:
+                logger.exception(
+                    "Failed to deliver EDD %sh reminder shipment_id=%s user=%s",
+                    hours,
+                    shipment_id,
+                    user_id,
+                )
+            except Exception:
+                logger.exception(
+                    "Unexpected EDD reminder delivery error shipment_id=%s user=%s",
+                    shipment_id,
+                    user_id,
+                )
+
+        if delivered == 0:
+            await self.repo.clear_edd_reminder_sent(shipment_id, hours)
+            logger.warning(
+                "EDD %sh reminder shipment_id=%s not delivered; will retry later",
+                hours,
+                shipment_id,
+            )
+            return
+
+        logger.info(
+            "EDD %sh reminder delivered shipment_id=%s recipients=%s",
+            hours,
+            shipment_id,
+            delivered,
+        )

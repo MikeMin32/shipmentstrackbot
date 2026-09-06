@@ -21,6 +21,7 @@ class Config:
     allowed_user_ids: frozenset[int]
     database_path: Path
     app_timezone: str
+    edd_reminder_hour: int
 
 
 def _parse_allowed_user_ids(raw: str) -> frozenset[int]:
@@ -60,9 +61,22 @@ def load_config() -> Config:
     except Exception as exc:
         raise RuntimeError(f"Invalid APP_TIMEZONE: {app_timezone}") from exc
 
+    hour_raw = os.getenv("EDD_REMINDER_HOUR", "9").strip() or "9"
+    try:
+        edd_reminder_hour = int(hour_raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"EDD_REMINDER_HOUR must be an integer hour 0-23, got {hour_raw!r}"
+        ) from exc
+    if edd_reminder_hour < 0 or edd_reminder_hour > 23:
+        raise RuntimeError(
+            f"EDD_REMINDER_HOUR must be an integer hour 0-23, got {edd_reminder_hour}"
+        )
+
     return Config(
         bot_token=token,
         allowed_user_ids=allowed,
         database_path=db_path,
         app_timezone=app_timezone,
+        edd_reminder_hour=edd_reminder_hour,
     )

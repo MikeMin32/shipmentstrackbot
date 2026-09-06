@@ -33,7 +33,7 @@ MONTHS_ABBR = (
     "Dec",
 )
 
-LABEL_WIDTH = 12
+LABEL_WIDTH = 14
 
 
 def esc(value: Any) -> str:
@@ -115,15 +115,29 @@ def format_home_date(
     return f"{weekday}, {month} {day}"
 
 
-def format_weight(value: Any, *, empty: str = "—") -> str:
+def format_unit_quantity(value: Any, *, empty: str = "—") -> str:
+    text = _unit_quantity_number(value)
+    return text if text is not None else empty
+
+
+def format_unit_quantity_compact(value: Any) -> str | None:
+    """Compact notification form, e.g. 5u. None when the value is missing."""
+    text = _unit_quantity_number(value)
+    if text is None:
+        return None
+    return f"{text}u"
+
+
+def _unit_quantity_number(value: Any) -> str | None:
     if value is None or value == "":
-        return empty
+        return None
     try:
         number = float(value)
     except (TypeError, ValueError):
-        return empty
-    text = f"{number:.3f}".rstrip("0").rstrip(".")
-    return f"{text} kg"
+        return None
+    return f"{number:.3f}".rstrip("0").rstrip(".")
+
+
 
 
 def format_reminder_at(
@@ -241,7 +255,7 @@ def format_details(
         "",
         _row("Account", _dash(shipment.get("account_name"))),
         _row("Client Team", _dash(shipment.get("client_team_name"))),
-        _row("Weight", format_weight(shipment.get("box_weight"))),
+        _row("Unit quantity", format_unit_quantity(shipment.get("unit_quantity"))),
         "",
         _row("Label", format_human_date(shipment.get("label_creation_date"), today=today)),
         _row("Scanned", format_human_date(shipment.get("scanned_in_date"), today=today)),
@@ -276,7 +290,7 @@ def format_draft(
         _row(req("Country", bool(country)), _dash(country_shown)),
         _row(req("Account", bool(draft.get("account_id"))), _dash(account_name)),
         _row("Client Team", _dash(team_name)),
-        _row("Weight", format_weight(draft.get("box_weight"))),
+        _row("Unit quantity", format_unit_quantity(draft.get("unit_quantity"))),
         _row("Status", status_line(draft.get("status") or "preparing")),
         "",
         _row("Label", format_human_date(draft.get("label_creation_date"), today=today)),
@@ -448,12 +462,33 @@ def format_reminder(shipment: dict[str, Any], current: str | None) -> str:
     )
 
 
-def format_weight_prompt(current: Any) -> str:
+def format_unit_quantity_prompt(current: Any) -> str:
     return (
-        "<b>⚖️ BOX WEIGHT</b>\n"
-        f"Current: {format_weight(current)}\n\n"
-        "Type the new weight in kg."
+        "<b>UNIT QUANTITY</b>\n"
+        f"Current: {format_unit_quantity(current)}\n\n"
+        "Type the new unit quantity."
     )
+
+
+def format_edd_reminder_notice(shipment: dict[str, Any], *, hours: int) -> str:
+    """Plain operational notice for Expected Delivery 48h/24h reminders."""
+    name = (shipment.get("name") or "").strip()
+    if not name:
+        name = (shipment.get("account_name") or "").strip() or (shipment.get("clone_name") or "").strip()
+    qty = format_unit_quantity_compact(shipment.get("unit_quantity"))
+    team = (shipment.get("client_team_name") or "").strip()
+
+    if name:
+        head = f"{esc(name)} ({esc(qty)})" if qty else esc(name)
+        lead = f"{head} shipment expected delivery"
+    elif qty:
+        lead = f"({esc(qty)}) shipment expected delivery"
+    else:
+        lead = "Shipment expected delivery"
+
+    if team:
+        return f"{lead} to {esc(team)} in {hours} hrs; check tracking."
+    return f"{lead} in {hours} hrs; check tracking."
 
 
 def format_note_prompt() -> str:

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import aiosqlite
 
@@ -26,7 +27,7 @@ MAX_COUNTRY_LEN = 40
 MAX_CLONE_LEN = 80
 MAX_SHIPMENT_NAME_LEN = 80
 MAX_NOTE_LEN = 500
-MAX_BOX_WEIGHT = 10000.0
+MAX_UNIT_QUANTITY = 10000.0
 SHIPMENT_SELECT = """
 SELECT
     s.*,
@@ -58,15 +59,15 @@ def _compose_display_name(country: str, clone_name: str, name: str = "") -> str:
     return secondary or country
 
 
-def validate_box_weight(value: float | int | None) -> float | None:
+def validate_unit_quantity(value: float | int | None) -> float | None:
     if value is None:
         return None
-    weight = float(value)
-    if weight <= 0:
-        raise ValueError("Box weight must be a positive number")
-    if weight > MAX_BOX_WEIGHT:
-        raise ValueError(f"Box weight must be at most {MAX_BOX_WEIGHT:g} kg")
-    return round(weight, 3)
+    quantity = float(value)
+    if quantity <= 0:
+        raise ValueError("Unit quantity must be a positive number")
+    if quantity > MAX_UNIT_QUANTITY:
+        raise ValueError(f"Unit quantity must be at most {MAX_UNIT_QUANTITY:g}")
+    return round(quantity, 3)
 
 
 # Initial list matching the previous chat-based tracker
@@ -195,7 +196,7 @@ class ShipmentRepository:
         expected_delivery_date: str | None = None,
         account_id: int | None = None,
         client_team_id: int | None = None,
-        box_weight: float | None = None,
+        unit_quantity: float | None = None,
         label_creation_date: str | None = None,
         scanned_in_date: str | None = None,
         require_account: bool = True,
@@ -228,7 +229,7 @@ class ShipmentRepository:
         edd = coerce_iso_date(expected_delivery_date) if expected_delivery_date else None
         label_date = coerce_iso_date(label_creation_date) if label_creation_date else None
         scanned_date = coerce_iso_date(scanned_in_date) if scanned_in_date else None
-        weight = validate_box_weight(box_weight)
+        quantity = validate_unit_quantity(unit_quantity)
 
         display_name = _compose_display_name(country, clone_name, shipment_name or "")
         now = _now()
@@ -238,7 +239,7 @@ class ShipmentRepository:
                 INSERT INTO shipments (
                     country, clone_name, name, display_name, status, note,
                     expected_date, expected_delivery_date,
-                    account_id, client_team_id, box_weight,
+                    account_id, client_team_id, unit_quantity,
                     label_creation_date, scanned_in_date, delivered_date,
                     created_at, updated_at, created_by, archived
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 0)
@@ -254,7 +255,7 @@ class ShipmentRepository:
                     edd,
                     account_id,
                     client_team_id,
-                    weight,
+                    quantity,
                     label_date,
                     scanned_date,
                     now,
@@ -633,7 +634,7 @@ class ShipmentRepository:
         scanned_in_date: str | None | object = Ellipsis,
         account_id: int | None | object = Ellipsis,
         client_team_id: int | None | object = Ellipsis,
-        box_weight: float | None | object = Ellipsis,
+        unit_quantity: float | None | object = Ellipsis,
         allow_archived: bool = False,
     ) -> dict[str, Any] | None:
         shipment = await self.get_by_id(shipment_id)
@@ -696,6 +697,12 @@ class ShipmentRepository:
             if field == "expected_delivery_date":
                 assignments.append("expected_date = ?")
                 params.append(date_value)
+                old_edd = extract_date_component(
+                    shipment.get("expected_delivery_date") or shipment.get("expected_date")
+                )
+                if date_value != old_edd:
+                    assignments.append("edd_48h_sent_for = NULL")
+                    assignments.append("edd_24h_sent_for = NULL")
 
         if account_id is not Ellipsis:
             if account_id is None:
@@ -710,9 +717,11 @@ class ShipmentRepository:
             assignments.append("client_team_id = ?")
             params.append(team_value)
 
-        if box_weight is not Ellipsis:
-            assignments.append("box_weight = ?")
-            params.append(validate_box_weight(box_weight) if box_weight is not None else None)
+        if unit_quantity is not Ellipsis:
+            assignments.append("unit_quantity = ?")
+            params.append(
+                validate_unit_quantity(unit_quantity) if unit_quantity is not None else None
+            )
 
         if not assignments:
             return shipment
@@ -937,3 +946,148 @@ class ShipmentRepository:
         )
         await self.db.connection.commit()
         return (cursor.rowcount or 0) > 0
+
+    async def due_edd_reminders(
+        self,
+        *,
+        now: datetime | None = None,
+        tz_name: str = "UTC",
+        reminder_hour: int = 9,
+    ) -> list[dict[str, Any]]:
+        """Return 48h/24h Expected Delivery reminders that are due and unsent."""
+        now_dt = now or now_utc()
+        if now_dt.tzinfo is None:
+            now_dt = now_dt.replace(tzinfo=timezone.utc)
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = ZoneInfo("UTC")
+        local_now = now_dt.astimezone(tz)
+
+        cursor = await self.db.connection.execute(
+            """
+            SELECT
+                s.id,
+                s.name,
+                s.clone_name,
+                s.display_name,
+                s.country,
+                s.status,
+                s.archived,
+                s.unit_quantity,
+                s.expected_delivery_date,
+                s.expected_date,
+                s.edd_48h_sent_for,
+                s.edd_24h_sent_for,
+                s.created_by,
+                a.name AS account_name,
+                t.name AS client_team_name
+            FROM shipments s
+            LEFT JOIN accounts a ON a.id = s.account_id
+            LEFT JOIN client_teams t ON t.id = s.client_team_id
+            WHERE s.archived = 0
+              AND s.status != 'delivered'
+              AND (
+                    (s.expected_delivery_date IS NOT NULL AND s.expected_delivery_date != '')
+                 OR (s.expected_date IS NOT NULL AND s.expected_date != '')
+              )
+            ORDER BY s.id ASC
+            """
+        )
+        due: list[dict[str, Any]] = []
+        for row in await cursor.fetchall():
+            item = dict(row)
+            edd = extract_date_component(
+                item.get("expected_delivery_date") or item.get("expected_date")
+            )
+            if not edd:
+                continue
+            try:
+                edd_date = date.fromisoformat(edd)
+            except ValueError:
+                continue
+            for hours, sent_for in (
+                (48, item.get("edd_48h_sent_for")),
+                (24, item.get("edd_24h_sent_for")),
+            ):
+                if sent_for == edd:
+                    continue
+                if _edd_reminder_is_due(local_now, edd_date, hours, reminder_hour):
+                    due.append({**item, "edd": edd, "edd_hours": hours})
+                    break
+        return due
+
+    async def mark_edd_reminder_sent(
+        self,
+        shipment_id: int,
+        hours: int,
+        edd: str,
+    ) -> bool:
+        """Claim an EDD reminder for this shipment+date. True if this call won."""
+        column = _edd_sent_column(hours)
+        cursor = await self.db.connection.execute(
+            f"""
+            UPDATE shipments
+            SET {column} = ?
+            WHERE id = ?
+              AND archived = 0
+              AND status != 'delivered'
+              AND (
+                    expected_delivery_date = ?
+                 OR (
+                        (expected_delivery_date IS NULL OR expected_delivery_date = '')
+                    AND expected_date = ?
+                 )
+              )
+              AND ({column} IS NULL OR {column} != ?)
+            """,
+            (edd, shipment_id, edd, edd, edd),
+        )
+        await self.db.connection.commit()
+        return (cursor.rowcount or 0) > 0
+
+    async def clear_edd_reminder_sent(self, shipment_id: int, hours: int) -> None:
+        column = _edd_sent_column(hours)
+        await self.db.connection.execute(
+            f"UPDATE shipments SET {column} = NULL WHERE id = ?",
+            (shipment_id,),
+        )
+        await self.db.connection.commit()
+
+
+def _edd_sent_column(hours: int) -> str:
+    if hours == 48:
+        return "edd_48h_sent_for"
+    if hours == 24:
+        return "edd_24h_sent_for"
+    raise ValueError(f"Unsupported EDD reminder hours: {hours}")
+
+
+def _edd_reminder_is_due(
+    local_now: datetime,
+    edd_date: date,
+    hours: int,
+    reminder_hour: int,
+) -> bool:
+    """True when now is in the 48h or 24h window before EDD at the daily reminder hour."""
+    if hours == 48:
+        window_start = datetime.combine(
+            edd_date - timedelta(days=2),
+            time(hour=reminder_hour),
+            tzinfo=local_now.tzinfo,
+        )
+        window_end = datetime.combine(
+            edd_date - timedelta(days=1),
+            time(hour=reminder_hour),
+            tzinfo=local_now.tzinfo,
+        )
+    elif hours == 24:
+        window_start = datetime.combine(
+            edd_date - timedelta(days=1),
+            time(hour=reminder_hour),
+            tzinfo=local_now.tzinfo,
+        )
+        window_end = datetime.combine(edd_date, time.min, tzinfo=local_now.tzinfo)
+    else:
+        return False
+    return window_start <= local_now < window_end

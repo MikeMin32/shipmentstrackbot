@@ -11,6 +11,7 @@ def make_config(tmp_path: Path, **overrides: object) -> Config:
         "allowed_user_ids": frozenset({111, 222}),
         "database_path": tmp_path / "shipments.db",
         "app_timezone": "UTC",
+        "edd_reminder_hour": 9,
     }
     values.update(overrides)
     return Config(**values)  # type: ignore[arg-type]

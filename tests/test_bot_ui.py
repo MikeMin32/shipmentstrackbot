@@ -12,14 +12,20 @@ from bot_ui.format import (
     compact_title,
     display_title,
     format_account_compact,
+    format_details,
+    format_draft,
+    format_edd_reminder_notice,
     format_home,
     format_home_date,
     format_human_date,
+    format_unit_quantity,
+    format_unit_quantity_compact,
+    format_unit_quantity_prompt,
 )
 from domain.countries import CODE_INDEX, country_code_to_flag, format_country_code, search_countries
 from bot_ui.grouping import group_home_shipments, page_active_shipments, sort_by_edd
 from domain.status import HOME_STATUS_ORDER, STATUS_EMOJI, status_emoji
-from bot_ui.parse import parse_weight_text
+from bot_ui.parse import parse_unit_quantity_text
 from bot_ui.calendar import WEEKDAYS
 from bot_ui.keyboards import details_keyboard, draft_keyboard
 from bot_ui.views import use_named_picker, view_calendar, view_details, view_draft, view_home, view_picker
@@ -121,7 +127,7 @@ async def test_home_groups_and_edd_order(tmp_path) -> None:
         assert "📦 <b>PREPARING</b>" in view.text
         assert "🏷️ <b>MAKE LABEL</b>" not in view.text
         assert "⏸️ <b>STANDBY</b>" not in view.text
-        assert view.text.index("EN ROUTE") < view.text.index("OUT FOR DELIVERY") < view.text.index("PREPARING")
+        assert view.text.index("OUT FOR DELIVERY") < view.text.index("EN ROUTE") < view.text.index("PREPARING")
         assert "1." in view.text
         assert "Acme" in view.text
         assert "Mini App URL is not configured" not in view.text
@@ -186,13 +192,73 @@ def test_draft_requires_name_country_account() -> None:
 
 
 def test_weight_validation() -> None:
-    assert parse_weight_text("8.4 kg") == 8.4
+    assert parse_unit_quantity_text("8.4 kg") == 8.4
+    assert parse_unit_quantity_text("5") == 5
+    assert parse_unit_quantity_text("5u") == 5
     with pytest.raises(ValueError):
-        parse_weight_text("nope")
+        parse_unit_quantity_text("nope")
     with pytest.raises(ValueError):
-        parse_weight_text("-1")
+        parse_unit_quantity_text("-1")
     with pytest.raises(ValueError):
-        parse_weight_text("0")
+        parse_unit_quantity_text("0")
+
+
+def test_unit_quantity_display_and_notice() -> None:
+    today = __import__("datetime").date(2026, 9, 6)
+    assert format_unit_quantity(5) == "5"
+    assert format_unit_quantity(8.4) == "8.4"
+    assert format_unit_quantity(None) == "—"
+    assert format_unit_quantity_compact(5) == "5u"
+    assert format_unit_quantity_compact(None) is None
+    assert "kg" not in format_unit_quantity(5)
+    assert "kg" not in format_unit_quantity_prompt(5)
+
+    details = format_details(
+        {
+            "id": 1,
+            "name": "Oner Active",
+            "status": "enroute",
+            "unit_quantity": 5,
+            "account_name": "Oner",
+            "client_team_name": "Stealth",
+        },
+        reminder_text=None,
+        today=today,
+    )
+    assert "Unit quantity" in details
+    assert "Weight" not in details
+    assert "kg" not in details
+    assert "5" in details
+
+    draft = format_draft(
+        {"unit_quantity": 8.4, "status": "preparing"},
+        account_name=None,
+        team_name=None,
+        today=today,
+    )
+    assert "Unit quantity" in draft
+    assert "Weight" not in draft
+    assert "kg" not in draft
+
+    assert format_edd_reminder_notice(
+        {"name": "Oner Active", "unit_quantity": 5, "client_team_name": "Stealth"},
+        hours=48,
+    ) == "Oner Active (5u) shipment expected delivery to Stealth in 48 hrs; check tracking."
+    assert format_edd_reminder_notice(
+        {"name": "Oner Active", "unit_quantity": 5, "client_team_name": "Stealth"},
+        hours=24,
+    ) == "Oner Active (5u) shipment expected delivery to Stealth in 24 hrs; check tracking."
+    assert format_edd_reminder_notice(
+        {"name": "Oner Active", "client_team_name": "Stealth"},
+        hours=48,
+    ) == "Oner Active shipment expected delivery to Stealth in 48 hrs; check tracking."
+    assert format_edd_reminder_notice(
+        {"name": "Oner Active", "unit_quantity": 5},
+        hours=48,
+    ) == "Oner Active (5u) shipment expected delivery in 48 hrs; check tracking."
+    assert format_edd_reminder_notice({}, hours=24) == (
+        "Shipment expected delivery in 24 hrs; check tracking."
+    )
 
 
 def test_outdated_workspace_detects_old_message() -> None:
@@ -449,7 +515,7 @@ def test_home_orders_within_status_by_edd() -> None:
     assert [item["id"] for item in grouped["preparing"]] == [4, 5]
     page_items, _page, _pages, total = page_active_shipments(shipments, 0, size=9)
     assert total == 6
-    assert [item["id"] for item in page_items] == [1, 2, 3, 6, 4, 5]
+    assert [item["id"] for item in page_items] == [6, 1, 2, 3, 4, 5]
 
 
 def test_sort_by_edd_stable_id() -> None:
@@ -477,8 +543,8 @@ def test_home_format_uses_status_sections() -> None:
     today = __import__("datetime").date(2026, 9, 6)
     text = format_home(
         page_items=[
-            {"id": 1, "country": "DE", "account_name": "Oner", "status": "enroute", "expected_delivery_date": "2026-09-07"},
             {"id": 2, "country": "IT", "account_name": "Fargo", "status": "out_for_delivery", "expected_delivery_date": "2026-09-06"},
+            {"id": 1, "country": "DE", "account_name": "Oner", "status": "enroute", "expected_delivery_date": "2026-09-07"},
             {"id": 3, "country": "LA", "account_name": "Bridge Publications", "status": "preparing", "expected_delivery_date": None},
             {"id": 4, "country": "CA", "account_name": "Durston", "status": "make_label", "expected_delivery_date": "2026-09-11"},
             {"id": 5, "country": "LA", "account_name": "Le Bon", "status": "standby", "expected_delivery_date": None},
@@ -492,18 +558,18 @@ def test_home_format_uses_status_sections() -> None:
     assert "in transit" not in text.lower()
     assert "IN TRANSIT" not in text
     assert "WORKING ON" not in text
-    assert text.startswith("✈️ <b>EN ROUTE</b>")
-    assert "1. Oner · 🇩🇪 DE — Tomorrow, Sep 7" in text
-    assert "2. Fargo · 🇮🇹 IT — Today, Sep 6" in text
+    assert text.startswith("🚚 <b>OUT FOR DELIVERY</b>\n")
+    assert "1. Fargo · 🇮🇹 IT — Today, Sep 6" in text
+    assert "2. Oner · 🇩🇪 DE — Tomorrow, Sep 7" in text
     assert "3. Bridge Publications · LA" in text
     assert "Bridge Publications · LA —" not in text
     assert "4. Durston · 🇨🇦 CA — Fri, Sep 11" in text
     assert "5. Le Bon · LA" in text
     assert "6. Auto Direct · ATL" in text
     assert "🇩🇪" not in text.split("Le Bon")[1][:20]
-    assert text.index("EN ROUTE") < text.index("OUT FOR DELIVERY") < text.index("PREPARING")
+    assert text.index("OUT FOR DELIVERY") < text.index("EN ROUTE") < text.index("PREPARING")
     assert text.index("PREPARING") < text.index("MAKE LABEL") < text.index("STANDBY")
-    assert "\n\n🚚 <b>OUT FOR DELIVERY</b>\n" in text
+    assert "\n\n✈️ <b>EN ROUTE</b>\n" in text
     assert "\n\n📦 <b>PREPARING</b>\n" in text
     assert "\n\n🏷️ <b>MAKE LABEL</b>\n" in text
     assert "\n\n⏸️ <b>STANDBY</b>\n" in text
@@ -552,8 +618,8 @@ def test_status_emoji_mapping() -> None:
     assert status_emoji("standby") == "⏸️"
     assert status_emoji("delivered") == "✅"
     assert HOME_STATUS_ORDER == (
-        "enroute",
         "out_for_delivery",
+        "enroute",
         "preparing",
         "make_label",
         "standby",
@@ -677,6 +743,16 @@ def _date_field_buttons(markup) -> dict[str, DateCB]:
     return found
 
 
+def test_create_edit_buttons_say_unit_quantity() -> None:
+    details = details_keyboard({"id": 11, "archived": 0, "status": "enroute"})
+    draft = draft_keyboard()
+    for markup in (details, draft):
+        texts = [btn.text for row in markup.inline_keyboard for btn in row]
+        assert "Unit quantity" in texts
+        assert "Weight" not in texts
+        assert not any("kg" in text.lower() for text in texts)
+
+
 def test_shipment_date_fields_open_calendar_directly() -> None:
     details = details_keyboard(
         {
@@ -796,6 +872,7 @@ async def test_workspace_screens_remain_available(tmp_path) -> None:
             clone_name="Oner",
             status="enroute",
             account_id=acc["id"],
+            unit_quantity=5,
             expected_delivery_date="2026-09-08",
             require_account=True,
         )
@@ -804,8 +881,13 @@ async def test_workspace_screens_remain_available(tmp_path) -> None:
         details = await view_details(repo, shipment["id"], tz_name="UTC")
         assert details is not None
         assert "✈️ En Route" in details.text
+        assert "Unit quantity" in details.text
+        assert "Weight" not in details.text
+        assert "kg" not in details.text
         draft = await view_draft(new_draft(), accounts, teams, tz_name="UTC")
         assert "NEW SHIPMENT" in draft.text
+        assert "Unit quantity" in draft.text
+        assert "Weight" not in draft.text
         calendar = view_calendar(
             field="ed",
             target="s",

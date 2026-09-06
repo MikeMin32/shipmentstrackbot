@@ -44,7 +44,9 @@ CREATE TABLE IF NOT EXISTS shipments (
     expected_delivery_date TEXT,
     account_id INTEGER,
     client_team_id INTEGER,
-    box_weight REAL,
+    unit_quantity REAL,
+    edd_48h_sent_for TEXT,
+    edd_24h_sent_for TEXT,
     label_creation_date TEXT,
     scanned_in_date TEXT,
     delivered_date TEXT,
@@ -118,7 +120,9 @@ NEW_SHIPMENT_COLUMNS: tuple[tuple[str, str], ...] = (
     ("expected_date", "TEXT"),
     ("account_id", "INTEGER"),
     ("client_team_id", "INTEGER"),
-    ("box_weight", "REAL"),
+    ("unit_quantity", "REAL"),
+    ("edd_48h_sent_for", "TEXT"),
+    ("edd_24h_sent_for", "TEXT"),
     ("label_creation_date", "TEXT"),
     ("scanned_in_date", "TEXT"),
     ("delivered_date", "TEXT"),
@@ -230,11 +234,48 @@ class Database:
                 return
             raise
 
+    async def _migrate_box_weight_to_unit_quantity(self) -> None:
+        """Copy leftover box_weight values into unit_quantity, then drop box_weight.
+
+        Safe on fresh databases (no box_weight), already-migrated databases, and
+        databases that still have the old column. Existing unit_quantity values
+        are never overwritten.
+        """
+        cols = await self._table_columns("shipments")
+        if "unit_quantity" not in cols:
+            await self._add_column("unit_quantity", "REAL")
+            cols = await self._table_columns("shipments")
+
+        if "box_weight" not in cols:
+            return
+
+        cursor = await self.connection.execute(
+            """
+            UPDATE shipments
+            SET unit_quantity = box_weight
+            WHERE unit_quantity IS NULL
+              AND box_weight IS NOT NULL
+            """
+        )
+        copied = cursor.rowcount or 0
+        if copied:
+            logger.info("Copied box_weight into unit_quantity for %s shipment(s)", copied)
+
+        try:
+            await self.connection.execute("ALTER TABLE shipments DROP COLUMN box_weight")
+            logger.info("Dropped leftover shipments.box_weight column")
+        except aiosqlite.OperationalError as exc:
+            # SQLite < 3.35 cannot DROP COLUMN. Leave the unused column in place;
+            # application code reads and writes unit_quantity only.
+            logger.info("Could not drop shipments.box_weight (%s); column left unused", exc)
+
     async def _migrate(self) -> None:
         cols = await self._table_columns("shipments")
         for name, col_type in NEW_SHIPMENT_COLUMNS:
             if name not in cols:
                 await self._add_column(name, col_type)
+
+        await self._migrate_box_weight_to_unit_quantity()
 
         # Copy legacy EDD into expected_delivery_date when that column is empty.
         await self.connection.execute(

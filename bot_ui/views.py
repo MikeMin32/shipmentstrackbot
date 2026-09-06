@@ -33,7 +33,7 @@ from bot_ui.keyboards import (
     reminder_keyboard,
     reminder_time_keyboard,
     shipment_list_keyboard,
-    weight_input_keyboard,
+    unit_quantity_input_keyboard,
 )
 from database.entities import AccountRepository, ClientTeamRepository
 from database.repository import ShipmentRepository
@@ -641,10 +641,10 @@ def view_search_prompt() -> View:
     return View(fmt.format_search_prompt(), input_cancel_keyboard(), "input")
 
 
-def view_weight_prompt(current: Any, *, target: str, shipment_id: int) -> View:
+def view_unit_quantity_prompt(current: Any, *, target: str, shipment_id: int) -> View:
     return View(
-        fmt.format_weight_prompt(current),
-        weight_input_keyboard(target, shipment_id),
+        fmt.format_unit_quantity_prompt(current),
+        unit_quantity_input_keyboard(target, shipment_id),
         "input",
     )
 
