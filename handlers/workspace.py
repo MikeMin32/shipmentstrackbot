@@ -354,7 +354,6 @@ async def show_current(
     sessions: BotSessionRepository,
     config: Config,
     from_notice: bool = False,
-    force_new: bool = False,
 ) -> None:
     frame = await current_frame(state)
     view = await render_frame(
@@ -373,7 +372,6 @@ async def show_current(
         user_id=message.from_user.id,
         chat_id=message.chat.id,
         view=view,
-        force_new=force_new,
     )
 
 
@@ -504,8 +502,8 @@ async def cmd_menu(
         user_id=user.id,
         chat_id=message.chat.id,
         view=view,
-        force_new=True,
     )
+    await try_delete_message(message)
 
 
 @router.message(Command("add"))
@@ -529,8 +527,8 @@ async def cmd_add(
         teams=teams,
         sessions=sessions,
         config=config,
-        force_new=True,
     )
+    await try_delete_message(message)
 
 
 @router.message(Command("search"))
@@ -555,9 +553,9 @@ async def cmd_search(
         user_id=user.id,
         chat_id=message.chat.id,
         view=view_search_prompt(),
-        force_new=True,
     )
     await sessions.set_view(user.id, "input")
+    await try_delete_message(message)
 
 
 @router.message(Command("cancel"))
@@ -580,8 +578,8 @@ async def cmd_cancel(
             teams=teams,
             sessions=sessions,
             config=config,
-            force_new=True,
         )
+        await try_delete_message(message)
         return
     await state.set_state(None)
     await state.update_data(input_kind=None, picker_query=None)
@@ -593,8 +591,8 @@ async def cmd_cancel(
         teams=teams,
         sessions=sessions,
         config=config,
-        force_new=True,
     )
+    await try_delete_message(message)
 
 
 # --- Navigation callbacks --------------------------------------------------

@@ -125,21 +125,20 @@ async def present(
     chat_id: int,
     view: View,
     prefer_message_id: int | None = None,
-    force_new: bool = False,
     from_notice: bool = False,
 ) -> int:
-    """Edit the active workspace or send a new one. Returns the active message_id.
+    """Show a view in the single active workspace. Returns the active message_id.
 
-    Reminder/notice messages are never adopted or edited. If a notice was sent
-    after the stored workspace, the old panel is retired and the requested view
-    is sent as a new message below that history.
+    Reminder/notice messages are never adopted or edited. There is at most one
+    interactive workspace: edit it in place, or retire it and send a replacement
+    below any later notifications.
     """
     session = await sessions.get(user_id)
     if from_notice:
         # Never treat a reminder/notice as the workspace edit target.
         prefer_message_id = None
 
-    if workspace_needs_reposition(session) and not force_new:
+    if workspace_needs_reposition(session):
         return await ensure_workspace_at_bottom(
             bot,
             sessions,
@@ -149,22 +148,47 @@ async def present(
             session=session,
         )
 
+    if session is None:
+        sent = await bot.send_message(chat_id, view.text, reply_markup=view.markup)
+        await _record_workspace(
+            sessions,
+            user_id=user_id,
+            chat_id=chat_id,
+            message_id=sent.message_id,
+            view_name=view.name,
+        )
+        return sent.message_id
+
     target_id = prefer_message_id
-    if target_id is None and session is not None and not force_new:
+    if target_id is None:
         target_id = int(session["message_id"])
         chat_id = int(session["chat_id"])
 
-    if force_new:
-        target_id = None
-
-    if target_id is not None:
-        try:
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=target_id,
-                text=view.text,
-                reply_markup=view.markup,
-            )
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=target_id,
+            text=view.text,
+            reply_markup=view.markup,
+        )
+        await _record_workspace(
+            sessions,
+            user_id=user_id,
+            chat_id=chat_id,
+            message_id=target_id,
+            view_name=view.name,
+        )
+        return target_id
+    except TelegramBadRequest as exc:
+        if "message is not modified" in str(exc).lower():
+            try:
+                await bot.edit_message_reply_markup(
+                    chat_id=chat_id,
+                    message_id=target_id,
+                    reply_markup=view.markup,
+                )
+            except TelegramBadRequest:
+                pass
             await _record_workspace(
                 sessions,
                 user_id=user_id,
@@ -173,34 +197,9 @@ async def present(
                 view_name=view.name,
             )
             return target_id
-        except TelegramBadRequest as exc:
-            if "message is not modified" in str(exc).lower():
-                try:
-                    await bot.edit_message_reply_markup(
-                        chat_id=chat_id,
-                        message_id=target_id,
-                        reply_markup=view.markup,
-                    )
-                except TelegramBadRequest:
-                    pass
-                await _record_workspace(
-                    sessions,
-                    user_id=user_id,
-                    chat_id=chat_id,
-                    message_id=target_id,
-                    view_name=view.name,
-                )
-                return target_id
-            logger.info("Workspace edit failed (%s); sending a new panel", exc)
+        logger.info("Workspace edit failed (%s); recovering with a new panel", exc)
 
-    if session is not None:
-        if workspace_needs_reposition(session):
-            await retire_workspace(
-                bot, int(session["chat_id"]), int(session["message_id"])
-            )
-        else:
-            await strip_keyboard(bot, int(session["chat_id"]), int(session["message_id"]))
-
+    await retire_workspace(bot, int(session["chat_id"]), int(session["message_id"]))
     sent = await bot.send_message(chat_id, view.text, reply_markup=view.markup)
     await _record_workspace(
         sessions,
