@@ -77,13 +77,14 @@ def home_priority_shipments(
 def standby_account_row(account: dict[str, Any]) -> dict[str, Any]:
     """Home STANDBY placeholder for an idle active account (not a new shipment)."""
     name = str(account.get("name") or "Account")
+    country = (account.get("country") or "").strip() or None
     return {
         "id": 0,
         "status": "standby",
         "account_id": account.get("id"),
         "account_name": name,
         "name": name,
-        "country": None,
+        "country": country,
         "home_kind": "account",
         "expected_delivery_date": None,
         "archived": 0,

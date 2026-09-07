@@ -174,8 +174,8 @@ def _dash(value: str | None) -> str:
 def format_home(
     *,
     page_items: list[dict[str, Any]],
-    account_line: str,
     today: date,
+    account_line: str = "",
     page: int = 0,
     pages: int = 1,
     total_active: int | None = None,

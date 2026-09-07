@@ -195,7 +195,21 @@ class AccountRepository(NamedEntityRepository):
         """
         cursor = await self.db.connection.execute(
             """
-            SELECT a.*
+            SELECT
+                a.id,
+                a.name,
+                a.created_at,
+                a.updated_at,
+                a.archived,
+                (
+                    SELECT s.country
+                    FROM shipments s
+                    WHERE s.account_id = a.id
+                      AND s.country IS NOT NULL
+                      AND TRIM(s.country) != ''
+                    ORDER BY s.updated_at DESC, s.id DESC
+                    LIMIT 1
+                ) AS country
             FROM accounts a
             WHERE a.archived = 0
               AND EXISTS (

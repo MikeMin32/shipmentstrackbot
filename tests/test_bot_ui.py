@@ -23,7 +23,7 @@ from bot_ui.format import (
     format_unit_quantity_prompt,
 )
 from domain.countries import CODE_INDEX, country_code_to_flag, format_country_code, search_countries
-from bot_ui.grouping import group_home_shipments, page_active_shipments, sort_by_edd
+from bot_ui.grouping import group_home_shipments, page_active_shipments, sort_by_edd, standby_account_row
 from domain.status import HOME_STATUS_ORDER, STATUS_EMOJI, status_emoji
 from bot_ui.parse import parse_unit_quantity_text
 from bot_ui.calendar import WEEKDAYS
@@ -135,6 +135,8 @@ async def test_home_groups_and_edd_order(tmp_path) -> None:
         texts = [btn.text for row in view.markup.inline_keyboard for btn in row]
         assert "1" in texts
         assert "➕ Add" in texts
+        assert "📊 Accounts" in texts
+        assert "👤 <b>ACCOUNTS</b>" not in view.text
         assert any(text.startswith("📦 All ·") for text in texts)
         assert "⋯ More" not in texts
         assert "Open Mini App" not in texts
@@ -156,6 +158,24 @@ def test_account_compact_summary_and_plus_more() -> None:
     assert line.startswith("No account 12")
     assert "Acme 8" in line
     assert "+2 more" in line
+
+
+def test_standby_account_row_uses_same_country_formatting() -> None:
+    flagged = standby_account_row({"id": 7, "name": "Oner Active", "country": "DE"})
+    assert display_title(flagged) == "Oner Active · 🇩🇪 DE"
+    us_location = standby_account_row({"id": 8, "name": "Le Bon", "country": "LA"})
+    assert display_title(us_location) == "Le Bon · 🇺🇸 LA"
+    atl = standby_account_row({"id": 9, "name": "Auto Direct", "country": "ATL"})
+    assert display_title(atl) == "Auto Direct · 🇺🇸 ATL"
+    bare = standby_account_row({"id": 10, "name": "No Flag Co"})
+    assert bare["country"] is None
+    assert display_title(bare) == "No Flag Co"
+    text = format_home(page_items=[flagged, us_location, atl, bare], today=__import__("datetime").date(2026, 9, 8))
+    assert "1. Oner Active · 🇩🇪 DE" in text
+    assert "2. Le Bon · 🇺🇸 LA" in text
+    assert "3. Auto Direct · 🇺🇸 ATL" in text
+    assert "4. No Flag Co" in text
+    assert "👤 <b>ACCOUNTS</b>" not in text
 
 
 def test_display_title_name_first_then_flagged_country() -> None:
@@ -621,7 +641,6 @@ def test_home_format_uses_status_sections() -> None:
             {"id": 5, "country": "LA", "account_name": "Le Bon", "status": "standby", "expected_delivery_date": None},
             {"id": 6, "country": "ATL", "account_name": "Auto Direct", "status": "standby", "expected_delivery_date": None},
         ],
-        account_line="Oner 2 · Auto Direct 1 · Blickle 1 · +2 more",
         today=today,
     )
     assert "SHIPMENT TRACKER" not in text
@@ -645,9 +664,9 @@ def test_home_format_uses_status_sections() -> None:
     assert "\n\n📦 <b>PREPARING</b>\n" in text
     assert "\n\n🏷️ <b>MAKE LABEL</b>\n" in text
     assert "\n\n⏸️ <b>STANDBY</b>\n" in text
-    assert "\n\n👤 <b>ACCOUNTS</b>\n" in text
-    assert "Oner 2 · Auto Direct 1 · Blickle 1 · +2 more" in text
-    assert text.count("\n\n") == 5
+    assert "👤 <b>ACCOUNTS</b>" not in text
+    assert "Oner 2 · Auto Direct 1 · Blickle 1 · +2 more" not in text
+    assert text.count("\n\n") == 4
 
 
 def test_home_omits_empty_status_sections() -> None:
@@ -656,7 +675,6 @@ def test_home_omits_empty_status_sections() -> None:
             {"id": 1, "country": "DE", "account_name": "Oner", "status": "enroute", "expected_delivery_date": "2026-09-08"},
             {"id": 2, "country": "LA", "account_name": "Le Bon", "status": "standby", "expected_delivery_date": None},
         ],
-        account_line="Oner 1",
         today=__import__("datetime").date(2026, 9, 6),
     )
     assert "✈️ <b>EN ROUTE</b>" in text

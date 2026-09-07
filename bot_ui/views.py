@@ -129,10 +129,8 @@ async def view_home(
     page_items, page, pages, total = page_active_shipments(
         home_rows, page, size=HOME_PAGE_SIZE
     )
-    summary = await accounts.summary()
     text = fmt.format_home(
         page_items=page_items,
-        account_line=fmt.format_account_compact(summary),
         today=today,
         page=page,
         pages=pages,

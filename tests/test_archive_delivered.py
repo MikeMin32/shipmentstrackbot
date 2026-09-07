@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from bot_ui.callbacks import NavCB, ShipCB
 from bot_ui.views import view_archive, view_details, view_home, view_search_results
 from database.db import Database
 from database.entities import AccountRepository, ClientTeamRepository
@@ -136,8 +137,9 @@ async def test_active_account_returns_to_standby_when_no_open_shipments(tmp_path
 
         home = await view_home(repo, accounts, tz_name="UTC")
         assert "⏸️ <b>STANDBY</b>" in home.text
-        assert "Idle Co" in home.text
+        assert "Idle Co · 🇺🇸 LA" in home.text
         assert "Last One" not in home.text
+        assert "👤 <b>ACCOUNTS</b>" not in home.text
     finally:
         await db.close()
 
@@ -237,5 +239,94 @@ async def test_delivered_history_remains_intact(tmp_path) -> None:
         assert "Tracked" in details.text
         archive = await view_archive(repo, 0, tz_name="UTC")
         assert "Tracked" in archive.text
+        assert "Tracked · 🇩🇪 DE" in archive.text
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_standby_uses_latest_shipment_country_after_delivery(tmp_path) -> None:
+    db, repo, accounts, _teams = await _repos(tmp_path)
+    try:
+        account = await accounts.create("Oner Active")
+        older = await _create_open(repo, account["id"], country="CA", name="Older")
+        await repo.complete(older["id"], delivered_date="2026-09-01")
+        latest = await _create_open(repo, account["id"], country="DE", name="Oner Active")
+        await repo.complete(latest["id"], delivered_date="2026-09-04")
+
+        after = await repo.get_by_id(latest["id"])
+        assert after is not None
+        assert after["country"] == "DE"
+        assert after["status"] == "delivered"
+
+        standby = await accounts.list_standby()
+        assert standby[0]["country"] == "DE"
+        home = await view_home(repo, accounts, tz_name="UTC")
+        assert "1. Oner Active · 🇩🇪 DE" in home.text
+        assert "Oner Active" in home.text
+        assert "👤 <b>ACCOUNTS</b>" not in home.text
+        archive = await view_archive(repo, 0, tz_name="UTC")
+        assert "Oner Active · 🇩🇪 DE" in archive.text
+        search = await view_search_results(repo, "Oner Active", 0, tz_name="UTC")
+        assert "Oner Active · 🇩🇪 DE" in search.text
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_standby_account_without_location_does_not_crash(tmp_path) -> None:
+    db, repo, accounts, _teams = await _repos(tmp_path)
+    try:
+        account = await accounts.create("Blank Loc")
+        shipment = await _create_open(repo, account["id"], country="DE", name="Blank Loc")
+        await db.connection.execute(
+            "UPDATE shipments SET country = NULL WHERE id = ?",
+            (shipment["id"],),
+        )
+        await db.connection.commit()
+        await repo.complete(shipment["id"], delivered_date="2026-09-04")
+
+        standby = await accounts.list_standby()
+        assert standby[0]["country"] is None
+        home = await view_home(repo, accounts, tz_name="UTC")
+        assert "Blank Loc" in home.text
+        assert "Blank Loc ·" not in home.text
+        assert home.name == "home"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_home_numbering_maps_shipments_and_standby_accounts(tmp_path) -> None:
+    db, repo, accounts, _teams = await _repos(tmp_path)
+    try:
+        open_acc = await accounts.create("Open Co")
+        idle_acc = await accounts.create("Idle Co")
+        open_ship = await _create_open(
+            repo, open_acc["id"], country="DE", name="Moving", status="enroute"
+        )
+        delivered = await _create_open(repo, idle_acc["id"], country="LA", name="Parked")
+        await repo.complete(delivered["id"], delivered_date="2026-09-04")
+
+        home = await view_home(repo, accounts, tz_name="UTC")
+        assert "1. Moving · 🇩🇪 DE" in home.text
+        assert "2. Idle Co · 🇺🇸 LA" in home.text
+        assert "👤 <b>ACCOUNTS</b>" not in home.text
+        texts = [btn.text for row in home.markup.inline_keyboard for btn in row]
+        assert "📊 Accounts" in texts
+        assert "1" in texts
+        assert "2" in texts
+
+        first = home.markup.inline_keyboard[0][0]
+        second = home.markup.inline_keyboard[0][1]
+        ship_data = ShipCB.unpack(first.callback_data or "")
+        assert ship_data.x == "vw"
+        assert ship_data.i == open_ship["id"]
+        account_data = NavCB.unpack(second.callback_data or "")
+        assert account_data.x == "ah"
+        assert account_data.i == idle_acc["id"]
+
+        archive = await view_archive(repo, 0, tz_name="UTC")
+        assert "Parked · 🇺🇸 LA" in archive.text
     finally:
         await db.close()
