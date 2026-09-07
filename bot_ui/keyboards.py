@@ -89,6 +89,12 @@ def add_numeric_grid(
         builder.row(*row)
 
 
+def _home_item_callback(item: dict[str, Any]) -> str:
+    if item.get("home_kind") == "account":
+        return _nav("ah", i=int(item.get("account_id") or 0))
+    return _ship("vw", int(item["id"]))
+
+
 def home_keyboard(
     shipments: list[dict[str, Any]],
     *,
@@ -100,7 +106,7 @@ def home_keyboard(
     add_numeric_grid(
         builder,
         [
-            (str(index), _ship("vw", int(item["id"])))
+            (str(index), _home_item_callback(item))
             for index, item in enumerate(shipments, start=1)
         ],
         columns=3,

@@ -186,6 +186,33 @@ class AccountRepository(NamedEntityRepository):
             )
         return rows
 
+    async def list_standby(self) -> list[dict[str, Any]]:
+        """Active accounts with no open shipments, ready to sit in Home STANDBY.
+
+        Open = non-archived and not delivered. Inactive (archived) accounts are
+        excluded. Accounts that have never had a shipment are excluded so Home
+        only returns an account to Standby after its work is finished.
+        """
+        cursor = await self.db.connection.execute(
+            """
+            SELECT a.*
+            FROM accounts a
+            WHERE a.archived = 0
+              AND EXISTS (
+                    SELECT 1 FROM shipments s WHERE s.account_id = a.id
+              )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM shipments s
+                    WHERE s.account_id = a.id
+                      AND s.archived = 0
+                      AND s.status != 'delivered'
+              )
+            ORDER BY a.name COLLATE NOCASE ASC, a.id ASC
+            """
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
 
 class ClientTeamRepository(NamedEntityRepository):
     def __init__(self, db: Database) -> None:

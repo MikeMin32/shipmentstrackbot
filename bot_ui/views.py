@@ -12,7 +12,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from bot_ui import format as fmt
 from bot_ui.callbacks import NavCB, PickCB, ShipCB
 from bot_ui.draft import draft_missing
-from bot_ui.grouping import page_active_shipments, sort_by_edd
+from bot_ui.grouping import page_active_shipments, sort_by_edd, standby_account_row
 from bot_ui.keyboards import (
     ACCOUNTS_PAGE_SIZE,
     HOME_PAGE_SIZE,
@@ -124,8 +124,10 @@ async def view_home(
 ) -> View:
     today = app_today(tz_name)
     shipments = await repo.list_active()
+    idle_accounts = await accounts.list_standby()
+    home_rows = shipments + [standby_account_row(account) for account in idle_accounts]
     page_items, page, pages, total = page_active_shipments(
-        shipments, page, size=HOME_PAGE_SIZE
+        home_rows, page, size=HOME_PAGE_SIZE
     )
     summary = await accounts.summary()
     text = fmt.format_home(
@@ -141,7 +143,7 @@ async def view_home(
         text,
         home_keyboard(
             page_items,
-            total_active=total,
+            total_active=len(shipments),
             page=page,
             pages=pages,
         ),
@@ -393,7 +395,7 @@ async def view_search_results(
 ) -> View:
     today = app_today(tz_name)
     items, total, page, pages = await _paged_filtered(
-        repo, page, query=query, archived=False
+        repo, page, query=query, searchable=True
     )
     return View(
         fmt.format_search_results(
@@ -543,7 +545,7 @@ async def view_archive(
     tz_name: str,
 ) -> View:
     today = app_today(tz_name)
-    items, total, page, pages = await _paged_filtered(repo, page, archived=True)
+    items, total, page, pages = await _paged_filtered(repo, page, in_archive=True)
     return View(
         fmt.format_list(
             title="🗄 ARCHIVE",

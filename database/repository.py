@@ -408,13 +408,24 @@ class ShipmentRepository:
         archived: bool | None = False,
         active_only: bool = False,
         completed_only: bool = False,
+        in_archive: bool = False,
+        searchable: bool = False,
         limit: int = 50,
         offset: int = 0,
     ) -> tuple[list[dict[str, Any]], int]:
         where: list[str] = ["1=1"]
         params: list[Any] = []
 
-        if archived is not None:
+        if in_archive:
+            # Archive is the delivered/completed history plus manually hidden rows.
+            # Do not require archived=1, account activity, or a current-shipment flag.
+            where.append("(s.archived = 1 OR s.status = ?)")
+            params.append(DELIVERED_STATUS)
+        elif searchable:
+            # Search keeps delivered rows visible even if they were also archived.
+            where.append("(s.archived = 0 OR s.status = ?)")
+            params.append(DELIVERED_STATUS)
+        elif archived is not None:
             where.append("s.archived = ?")
             params.append(1 if archived else 0)
         if active_only:

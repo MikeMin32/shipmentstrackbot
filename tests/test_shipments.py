@@ -67,6 +67,9 @@ async def test_create_update_complete_archive_restore(tmp_path) -> None:
         completed_list, _ = await repo.list_filtered(completed_only=True, archived=False)
         assert any(item["id"] == shipment["id"] for item in completed_list)
 
+        archive_now, _ = await repo.list_filtered(in_archive=True)
+        assert any(item["id"] == shipment["id"] for item in archive_now)
+
         archived = await repo.archive(shipment["id"])
         assert archived is not None
         assert archived["archived"] == 1
