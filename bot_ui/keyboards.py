@@ -177,11 +177,11 @@ def details_keyboard(shipment: dict[str, Any]) -> InlineKeyboardMarkup:
 def draft_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
+        InlineKeyboardButton(text="🏢 Account", callback_data=_pick("o", "acc", "d")),
         InlineKeyboardButton(text="✏️ Name", callback_data=_nav("nm")),
-        InlineKeyboardButton(text="🌍 Country", callback_data=_pick("o", "co", "d")),
     )
     builder.row(
-        InlineKeyboardButton(text="🏢 Account", callback_data=_pick("o", "acc", "d")),
+        InlineKeyboardButton(text="🌍 Country", callback_data=_pick("o", "co", "d")),
         InlineKeyboardButton(text="👥 Team", callback_data=_pick("o", "tm", "d")),
     )
     builder.row(

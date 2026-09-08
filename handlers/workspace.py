@@ -14,7 +14,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, MenuButtonDefault
 
 from bot_ui.calendar import shift_month
 from bot_ui.callbacks import DateCB, NavCB, OpenCB, PickCB, RemCB, ShipCB
-from bot_ui.draft import draft_missing, new_draft
+from bot_ui.draft import draft_missing, new_draft, prefill_from_account
 from bot_ui.keyboards import iso_from_shipment_field
 from bot_ui.nav import current_frame, get_nav, goto, pop, push, replace_top, reset_home, set_nav
 from bot_ui.parse import parse_name, parse_unit_quantity_text
@@ -1579,13 +1579,15 @@ async def _apply_picker(
             return "Shipment not available"
         return None
     if kind in {"acc", "tm"}:
-        lookup = accounts if kind == "acc" else teams
-        entity = await lookup.get_by_id(selected)
+        if kind == "acc":
+            entity = await accounts.get_with_location(selected)
+        else:
+            entity = await teams.get_by_id(selected)
         if entity is None or entity.get("archived"):
             return "Not found"
         if target == "d":
             if kind == "acc":
-                draft["account_id"] = selected
+                prefill_from_account(draft, entity)
             else:
                 draft["client_team_id"] = selected
             await state.update_data(draft=draft)
@@ -2252,7 +2254,8 @@ async def _handle_input_kind(
         entity = await accounts.create(name)
         if target == "d":
             draft = dict(data.get("draft") or new_draft())
-            draft["account_id"] = entity["id"]
+            located = await accounts.get_with_location(entity["id"])
+            prefill_from_account(draft, located or entity)
             await state.update_data(draft=draft)
         else:
             updated = await repo.update_fields(shipment_id, account_id=entity["id"])

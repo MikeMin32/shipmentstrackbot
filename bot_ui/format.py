@@ -290,9 +290,9 @@ def format_draft(
     lines = [
         "<b>➕ NEW SHIPMENT</b>",
         "",
+        _row(req("Account", bool(draft.get("account_id"))), _dash(account_name)),
         _row(req("Name", bool(name)), _dash(name)),
         _row(req("Country", bool(country)), _dash(country_shown)),
-        _row(req("Account", bool(draft.get("account_id"))), _dash(account_name)),
         _row("Client Team", _dash(team_name)),
         _row("Unit quantity", format_unit_quantity(draft.get("unit_quantity"))),
         _row("Status", status_line(draft.get("status") or "preparing")),

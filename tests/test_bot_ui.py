@@ -7,7 +7,7 @@ import pytest
 from aiogram.types import Message
 
 from bot_ui.callbacks import DateCB, NavCB, PickCB, ShipCB
-from bot_ui.draft import draft_missing, new_draft
+from bot_ui.draft import draft_missing, new_draft, prefill_from_account
 from bot_ui.format import (
     compact_title,
     display_title,
@@ -35,7 +35,7 @@ from database.entities import AccountRepository, ClientTeamRepository
 from database.repository import ShipmentRepository
 from database.sessions import BotSessionRepository
 from domain.status import OPERATIONAL_STATUSES
-from handlers.workspace import _apply_picker, apply_date_value
+from handlers.workspace import _apply_picker, _handle_input_kind, apply_date_value
 from middlewares.auth import AccessControlMiddleware
 
 
@@ -203,14 +203,37 @@ def test_human_date_omits_same_year() -> None:
     assert format_human_date("2025-09-08", today=__import__("datetime").date(2026, 9, 4)) == "Sep 08, 2025"
 
 
-def test_draft_requires_name_country_account() -> None:
+def test_draft_requires_account_name_country() -> None:
     draft = new_draft()
-    assert draft_missing(draft) == ["name", "country", "account"]
+    assert draft_missing(draft) == ["account", "name", "country"]
+    draft["account_id"] = 1
+    assert draft_missing(draft) == ["name", "country"]
     draft["name"] = "Laptop Batch 4"
     draft["country"] = "DE"
-    assert draft_missing(draft) == ["account"]
-    draft["account_id"] = 1
     assert draft_missing(draft) == []
+
+
+def test_prefill_from_account_copies_name_and_country() -> None:
+    draft = new_draft()
+    prefill_from_account(draft, {"id": 7, "name": "Oner", "country": "DE"})
+    assert draft["account_id"] == 7
+    assert draft["name"] == "Oner"
+    assert draft["country"] == "DE"
+
+    prefill_from_account(draft, {"id": 8, "name": "Bridge Publications", "country": "LA"})
+    assert draft["account_id"] == 8
+    assert draft["name"] == "Bridge Publications"
+    assert draft["country"] == "LA"
+
+    draft["name"] = "Oner Active"
+    draft["country"] = "IT"
+    prefill_from_account(draft, {"id": 7, "name": "Oner", "country": "DE"})
+    assert draft["name"] == "Oner"
+    assert draft["country"] == "DE"
+
+    prefill_from_account(draft, {"id": 9, "name": "Fresh Co"})
+    assert draft["name"] == "Fresh Co"
+    assert draft["country"] is None
 
 
 def test_weight_validation() -> None:
@@ -441,9 +464,183 @@ async def test_create_draft_render(tmp_path) -> None:
         assert "Account A" in view.text
         assert "Clone" not in view.text
         texts = [btn.text for row in view.markup.inline_keyboard for btn in row]
-        assert texts[:4] == ["✏️ Name", "🌍 Country", "🏢 Account", "👥 Team"]
+        assert texts[:4] == ["🏢 Account", "✏️ Name", "🌍 Country", "👥 Team"]
         assert "🧬 Clone" not in texts
         assert "Create shipment" in view.markup.inline_keyboard[-2][0].text
+        labels = _draft_card_labels(view.text)
+        assert labels[:3] == ["Account", "Name", "Country"]
+    finally:
+        await db.close()
+
+
+async def _select_draft_account(state, repo, accounts, teams, account_id: int) -> None:
+    error = await _apply_picker(
+        PickCB(x="s", k="acc", t="d", i=0, n=int(account_id)),
+        state=state,
+        repo=repo,
+        accounts=accounts,
+        teams=teams,
+    )
+    assert error is None
+
+
+@pytest.mark.asyncio
+async def test_selecting_account_prefills_name_and_country(tmp_path) -> None:
+    db, repo, accounts, teams, _sessions = await _repos(tmp_path)
+    try:
+        oner = await accounts.create("Oner")
+        await repo.create(
+            country="DE",
+            name="Prior",
+            clone_name="Prior",
+            account_id=oner["id"],
+            require_account=True,
+        )
+        state = _FakeState({"draft": new_draft()})
+        await _select_draft_account(state, repo, accounts, teams, oner["id"])
+        draft = (await state.get_data())["draft"]
+        assert draft["account_id"] == oner["id"]
+        assert draft["name"] == "Oner"
+        assert draft["country"] == "DE"
+        assert draft_missing(draft) == []
+
+        view = await view_draft(draft, accounts, teams, tz_name="UTC")
+        assert _draft_card_labels(view.text)[:3] == ["Account", "Name", "Country"]
+        assert "Oner" in view.text
+        assert "Germany" in view.text
+        texts = [btn.text for row in view.markup.inline_keyboard for btn in row]
+        assert texts[:4] == ["🏢 Account", "✏️ Name", "🌍 Country", "👥 Team"]
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_selecting_account_preserves_la_and_atl_locations(tmp_path) -> None:
+    db, repo, accounts, teams, _sessions = await _repos(tmp_path)
+    try:
+        bridge = await accounts.create("Bridge Publications")
+        await repo.create(
+            country="LA",
+            name="Prior LA",
+            account_id=bridge["id"],
+            require_account=True,
+        )
+        atl = await accounts.create("Auto Direct")
+        await repo.create(
+            country="ATL",
+            name="Prior ATL",
+            account_id=atl["id"],
+            require_account=True,
+        )
+        state = _FakeState({"draft": new_draft()})
+        await _select_draft_account(state, repo, accounts, teams, bridge["id"])
+        draft = (await state.get_data())["draft"]
+        assert draft["name"] == "Bridge Publications"
+        assert draft["country"] == "LA"
+
+        view = await view_draft(draft, accounts, teams, tz_name="UTC")
+        assert "🇺🇸 LA" in view.text
+        assert "Laos" not in view.text
+        assert "🇺🇸 US LA" not in view.text
+
+        await _select_draft_account(state, repo, accounts, teams, atl["id"])
+        draft = (await state.get_data())["draft"]
+        assert draft["name"] == "Auto Direct"
+        assert draft["country"] == "ATL"
+        view = await view_draft(draft, accounts, teams, tz_name="UTC")
+        assert "🇺🇸 ATL" in view.text
+        assert "🇺🇸 US ATL" not in view.text
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_prefilled_name_and_country_remain_editable(tmp_path) -> None:
+    db, repo, accounts, teams, _sessions = await _repos(tmp_path)
+    try:
+        oner = await accounts.create("Oner")
+        await repo.create(
+            country="DE",
+            name="Prior",
+            account_id=oner["id"],
+            require_account=True,
+        )
+        state = _FakeState({"draft": new_draft(), "input_target": "d"})
+        await _select_draft_account(state, repo, accounts, teams, oner["id"])
+        data = await state.get_data()
+        assert data["draft"]["name"] == "Oner"
+        assert data["draft"]["country"] == "DE"
+
+        await _handle_input_kind(
+            kind="name",
+            raw="Oner Active",
+            state=state,
+            repo=repo,
+            accounts=accounts,
+            teams=teams,
+            data=data,
+        )
+        data = await state.get_data()
+        assert data["draft"]["name"] == "Oner Active"
+        assert data["draft"]["country"] == "DE"
+
+        error = await _apply_picker(
+            PickCB(x="s", k="co", t="d", i=0, n=CODE_INDEX["IT"]),
+            state=state,
+            repo=repo,
+            accounts=accounts,
+            teams=teams,
+        )
+        assert error is None
+        draft = (await state.get_data())["draft"]
+        assert draft["name"] == "Oner Active"
+        assert draft["country"] == "IT"
+
+        saved = await repo.create(
+            country=str(draft["country"]),
+            name=str(draft["name"]),
+            account_id=int(draft["account_id"]),
+            require_account=True,
+        )
+        assert saved["name"] == "Oner Active"
+        assert saved["country"] == "IT"
+        assert saved["account_id"] == oner["id"]
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_new_account_path_prefills_draft(tmp_path) -> None:
+    db, repo, accounts, teams, _sessions = await _repos(tmp_path)
+    try:
+        state = _FakeState({"draft": new_draft()})
+        await _handle_input_kind(
+            kind="account",
+            raw="Fresh Co",
+            state=state,
+            repo=repo,
+            accounts=accounts,
+            teams=teams,
+            data={"draft": new_draft(), "input_target": "d"},
+        )
+        draft = (await state.get_data())["draft"]
+        created = await accounts.find_by_name("Fresh Co")
+        assert created is not None
+        assert draft["account_id"] == created["id"]
+        assert draft["name"] == "Fresh Co"
+        assert draft["country"] is None
+
+        await repo.create(
+            country="LA",
+            name="Seed",
+            account_id=created["id"],
+            require_account=True,
+        )
+        other = new_draft()
+        located = await accounts.get_with_location(created["id"])
+        prefill_from_account(other, located or created)
+        assert other["name"] == "Fresh Co"
+        assert other["country"] == "LA"
     finally:
         await db.close()
 
@@ -485,6 +682,8 @@ async def test_picker_status_and_account_selection(tmp_path) -> None:
         assert error is None
         updated = await repo.get_by_id(shipment["id"])
         assert updated["account_id"] == acc_b["id"]
+        assert updated["country"] == "DE"
+        assert (updated.get("name") or updated.get("clone_name")) == "Oner"
 
         error = await _apply_picker(
             PickCB(x="s", k="st", t="s", i=shipment["id"], n=99),
@@ -617,6 +816,16 @@ def test_sort_by_edd_stable_id() -> None:
     ]
     ordered = sort_by_edd(rows)
     assert [row["id"] for row in ordered] == [1, 2, 3]
+
+
+def _draft_card_labels(text: str) -> list[str]:
+    labels: list[str] = []
+    for line in text.splitlines():
+        for label in ("Account", "Name", "Country", "Client Team"):
+            if line.startswith(label):
+                labels.append(label)
+                break
+    return labels
 
 
 class _FakeState:
@@ -977,6 +1186,9 @@ async def test_workspace_screens_remain_available(tmp_path) -> None:
         assert "kg" not in details.text
         draft = await view_draft(new_draft(), accounts, teams, tz_name="UTC")
         assert "NEW SHIPMENT" in draft.text
+        assert _draft_card_labels(draft.text)[:3] == ["Account", "Name", "Country"]
+        texts = [btn.text for row in draft.markup.inline_keyboard for btn in row]
+        assert texts[:4] == ["🏢 Account", "✏️ Name", "🌍 Country", "👥 Team"]
         assert "Unit quantity" in draft.text
         assert "Weight" not in draft.text
         calendar = view_calendar(

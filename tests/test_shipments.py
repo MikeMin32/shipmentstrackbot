@@ -319,6 +319,41 @@ async def test_reminder_replace_and_complete_cancels(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_duplicate_shipment_names_are_allowed(tmp_path) -> None:
+    db, repo, accounts, _teams = await _repos(tmp_path)
+    try:
+        first_account = await accounts.create("Oner")
+        second_account = await accounts.create("Bridge Publications")
+        first = await repo.create(
+            country="DE",
+            name="Oner",
+            account_id=first_account["id"],
+            require_account=True,
+        )
+        second = await repo.create(
+            country="LA",
+            name="Oner",
+            account_id=second_account["id"],
+            require_account=True,
+        )
+        again = await repo.create(
+            country="DE",
+            name="Oner",
+            account_id=first_account["id"],
+            expected_delivery_date="2026-09-10",
+            require_account=True,
+        )
+        assert first["id"] != second["id"] != again["id"]
+        assert first["name"] == second["name"] == again["name"] == "Oner"
+        assert first["account_id"] == first_account["id"]
+        assert second["account_id"] == second_account["id"]
+        assert first["country"] == "DE"
+        assert second["country"] == "LA"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_missing_shipment_is_none(tmp_path) -> None:
     db, repo, _accounts, _teams = await _repos(tmp_path)
     try:

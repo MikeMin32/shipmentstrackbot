@@ -132,6 +132,34 @@ class AccountRepository(NamedEntityRepository):
     def __init__(self, db: Database) -> None:
         super().__init__(db, "accounts")
 
+    async def latest_country(self, account_id: int) -> str | None:
+        """Account location is the latest non-empty shipment country for that account."""
+        cursor = await self.db.connection.execute(
+            """
+            SELECT s.country
+            FROM shipments s
+            WHERE s.account_id = ?
+              AND s.country IS NOT NULL
+              AND TRIM(s.country) != ''
+            ORDER BY s.updated_at DESC, s.id DESC
+            LIMIT 1
+            """,
+            (account_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        country = str(row["country"] or "").strip()
+        return country or None
+
+    async def get_with_location(self, account_id: int) -> dict[str, Any] | None:
+        account = await self.get_by_id(account_id)
+        if account is None:
+            return None
+        located = dict(account)
+        located["country"] = await self.latest_country(account_id)
+        return located
+
     async def summary(self) -> list[dict[str, Any]]:
         """Total shipments per account, including completed/archived rows."""
         cursor = await self.db.connection.execute(
